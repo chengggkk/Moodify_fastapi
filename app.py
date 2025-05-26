@@ -1,22 +1,24 @@
 import os
-import requests
+import asyncio
+import aiohttp
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.cluster import KMeans
+import re
 import warnings
 warnings.filterwarnings("ignore")
 
 load_dotenv()
 
 # Initialize FastAPI app
-app = FastAPI(title="NLP Story Generator API")
+app = FastAPI(title="Lyrics-to-Story Generator API")
 
 # Model configurations
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -32,17 +34,17 @@ class SongRequest(BaseModel):
     title: str
     artist: str
 
-class LyricsData(BaseModel):
-    lyrics: str
-
 class StoryParams(BaseModel):
-    max_length: int = 300
+    max_length: int = 400
     temperature: float = 0.8
+    top_p: float = 0.9
 
-class StoryGenerationRequest(BaseModel):
-    song_title: str
-    artist: str
-    story_params: Optional[StoryParams] = StoryParams()
+class LyricsAnalysisResult(BaseModel):
+    themes: List[str]
+    emotions: List[str]
+    story_elements: Dict[str, List[str]]
+    embeddings: List[List[float]]
+    story_prompt: str
 
 # Initialize models on startup
 @app.on_event("startup")
@@ -75,306 +77,435 @@ async def load_models():
         print(f"Error loading models: {e}")
         raise
 
-@app.get("/")
-def read_root():
-    return {
-        "message": "Streamlined NLP Story Generator API",
-        "functions": [
-            "1. Fetch lyrics by song title and artist",
-            "2. Generate embeddings for lyrics",
-            "3. Analyze embeddings for themes and sentiment",
-            "4. Generate story based on analysis"
-        ],
-        "endpoints": {
-            "/fetch-lyrics/": "Fetch lyrics from web",
-            "/embed-lyrics/": "Generate lyrics embeddings",
-            "/analyze-embeddings/": "Analyze embeddings for patterns",
-            "/generate-story-from-song/": "Complete pipeline: song to story"
+# Function 1: Enhanced lyrics fetching with multiple sources
+class LyricsFetcher:
+    def __init__(self):
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-    }
-
-# Function 1: Web crawler to fetch lyrics
-@app.post("/fetch-lyrics/")
-def fetch_lyrics(song_request: SongRequest):
-    """Fetch lyrics by song title and artist using web scraping"""
-    try:
-        # Format search query
-        query = f"{song_request.title} {song_request.artist} lyrics"
-        
-        # Use multiple sources for better reliability
-        lyrics = None
-        
-        # Try Genius.com first (most reliable for lyrics)
+    
+    async def search_genius(self, title: str, artist: str) -> Optional[str]:
+        """Search Genius.com for lyrics"""
         try:
-            genius_url = f"https://genius.com/search?q={query.replace(' ', '%20')}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            search_url = "https://genius.com/api/search/multi"
+            params = {
+                'per_page': 5,
+                'q': f"{title} {artist}"
             }
             
-            # Note: In a production environment, you'd want to use official APIs
-            # This is a simplified example - actual implementation would need
-            # proper API keys and respect rate limits
-            
-            # For demo purposes, return sample structure
-            lyrics = f"Sample lyrics for '{song_request.title}' by {song_request.artist}"
-            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(search_url, params=params, headers=self.headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Look for song matches
+                        if 'response' in data and 'sections' in data['response']:
+                            for section in data['response']['sections']:
+                                if section['type'] == 'song':
+                                    for hit in section['hits']:
+                                        song_url = hit['result']['url']
+                                        lyrics = await self._extract_genius_lyrics(session, song_url)
+                                        if lyrics:
+                                            return lyrics
         except Exception as e:
-            print(f"Error fetching from primary source: {e}")
+            print(f"Genius search error: {e}")
+        return None
+    
+    async def _extract_genius_lyrics(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
+        """Extract lyrics from Genius song page"""
+        try:
+            async with session.get(url, headers=self.headers) as response:
+                if response.status == 200:
+                    html = await response.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    
+                    # Find lyrics container (Genius uses various selectors)
+                    lyrics_divs = soup.find_all('div', {'data-lyrics-container': 'true'})
+                    if lyrics_divs:
+                        lyrics_parts = []
+                        for div in lyrics_divs:
+                            lyrics_parts.append(div.get_text(separator='\n'))
+                        return '\n'.join(lyrics_parts).strip()
+        except Exception as e:
+            print(f"Genius extraction error: {e}")
+        return None
+    
+    async def search_azlyrics(self, title: str, artist: str) -> Optional[str]:
+        """Search AZLyrics as fallback"""
+        try:
+            # Format for AZLyrics URL structure
+            artist_clean = re.sub(r'[^a-zA-Z0-9]', '', artist.lower())
+            title_clean = re.sub(r'[^a-zA-Z0-9]', '', title.lower())
+            
+            url = f"https://www.azlyrics.com/lyrics/{artist_clean}/{title_clean}.html"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers) as response:
+                    if response.status == 200:
+                        html = await response.text()
+                        soup = BeautifulSoup(html, 'html.parser')
+                        
+                        # AZLyrics lyrics are in a specific div
+                        lyrics_div = soup.find('div', class_='')
+                        if lyrics_div and not lyrics_div.get('class'):
+                            lyrics_text = lyrics_div.get_text(separator='\n').strip()
+                            if len(lyrics_text) > 50:  # Basic validation
+                                return lyrics_text
+        except Exception as e:
+            print(f"AZLyrics search error: {e}")
+        return None
+    
+    async def fetch_lyrics(self, title: str, artist: str) -> Dict[str, Any]:
+        """Try multiple sources to fetch lyrics"""
+        lyrics = None
+        source = "none"
         
-        # Fallback: Try alternative sources or return placeholder
-        if not lyrics:
-            lyrics = f"Unable to fetch lyrics for '{song_request.title}' by {song_request.artist}. Please provide lyrics manually."
+        # Try Genius first
+        lyrics = await self.search_genius(title, artist)
+        if lyrics:
+            source = "genius"
+        else:
+            # Try AZLyrics as fallback
+            lyrics = await self.search_azlyrics(title, artist)
+            if lyrics:
+                source = "azlyrics"
         
         return {
-            "title": song_request.title,
-            "artist": song_request.artist,
+            "title": title,
+            "artist": artist,
             "lyrics": lyrics,
-            "source": "web_crawler",
+            "source": source,
             "success": lyrics is not None
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lyrics fetching failed: {str(e)}")
 
-# Function 2: Generate embeddings for lyrics
-@app.post("/embed-lyrics/")
-def embed_lyrics(lyrics_data: LyricsData):
-    """Generate embeddings for lyrics text"""
-    if embedding_model is None:
-        raise HTTPException(status_code=500, detail="Embedding model not loaded")
+# Function 2 & 3: Combined Embedding and Analysis
+class LyricsAnalyzer:
+    def __init__(self, embedding_model):
+        self.embedding_model = embedding_model
+        self.theme_patterns = {
+            "love_romance": ["love", "heart", "kiss", "romance", "together", "forever", "baby", "darling", "beloved"],
+            "loss_heartbreak": ["lost", "gone", "cry", "tears", "miss", "lonely", "hurt", "pain", "goodbye", "broken"],
+            "freedom_rebellion": ["free", "fly", "run", "escape", "break", "rebel", "wild", "chains", "prison"],
+            "hope_dreams": ["hope", "dream", "wish", "believe", "future", "tomorrow", "light", "shine", "faith"],
+            "struggle_perseverance": ["fight", "battle", "struggle", "war", "overcome", "strength", "survive", "endure"],
+            "celebration_joy": ["dance", "party", "celebrate", "joy", "happy", "music", "sing", "laugh", "smile"],
+            "nostalgia_memory": ["remember", "past", "yesterday", "childhood", "used to", "old days", "memory", "time"],
+            "spirituality_transcendence": ["soul", "spirit", "heaven", "divine", "prayer", "angel", "sacred", "eternal"],
+            "nature_journey": ["mountain", "ocean", "river", "sky", "road", "path", "journey", "travel", "adventure"],
+            "urban_nightlife": ["city", "street", "neon", "night", "club", "bar", "downtown", "lights", "crowd"]
+        }
+        
+        self.emotion_patterns = {
+            "passionate": ["fire", "burn", "intense", "wild", "crazy", "mad", "fever", "flame"],
+            "melancholic": ["blue", "rain", "grey", "shadow", "dark", "cold", "empty", "hollow"],
+            "euphoric": ["high", "fly", "sky", "up", "rise", "soar", "electric", "alive"],
+            "rebellious": ["against", "system", "rules", "authority", "conform", "different"],
+            "romantic": ["tender", "gentle", "soft", "sweet", "warm", "embrace", "whisper"],
+            "empowering": ["strong", "power", "rise", "stand", "voice", "courage", "brave"]
+        }
     
-    try:
-        # Split lyrics into sentences for better analysis
-        sentences = [s.strip() for s in lyrics_data.lyrics.split('\n') if s.strip()]
+    def embed_and_analyze(self, lyrics: str) -> LyricsAnalysisResult:
+        """Combined embedding generation and analysis"""
+        # Split into meaningful segments
+        lines = [line.strip() for line in lyrics.split('\n') if line.strip()]
         
-        # Generate embeddings for each line and overall lyrics
-        sentence_embeddings = embedding_model.encode(sentences, convert_to_numpy=True)
-        overall_embedding = embedding_model.encode([lyrics_data.lyrics], convert_to_numpy=True)[0]
+        # Generate embeddings
+        line_embeddings = self.embedding_model.encode(lines, convert_to_numpy=True)
+        overall_embedding = self.embedding_model.encode([lyrics], convert_to_numpy=True)[0]
         
-        return {
-            "overall_embedding": overall_embedding.tolist(),
-            "sentence_embeddings": sentence_embeddings.tolist(),
-            "embedding_dimension": len(overall_embedding),
-            "num_sentences": len(sentences),
-            "sentences": sentences
-        }
+        # Cluster analysis for thematic grouping
+        themes = self._extract_themes(lyrics)
+        emotions = self._extract_emotions(lyrics)
+        story_elements = self._extract_story_elements(lyrics, lines, line_embeddings)
         
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding generation failed: {str(e)}")
-
-# Function 3: Analyze embeddings for themes and patterns
-@app.post("/analyze-embeddings/")
-def analyze_embeddings(lyrics_data: LyricsData):
-    """Analyze lyrics embeddings to extract themes, sentiment, and story elements"""
-    if embedding_model is None:
-        raise HTTPException(status_code=500, detail="Embedding model not loaded")
+        # Generate sophisticated story prompt
+        story_prompt = self._generate_story_prompt(themes, emotions, story_elements)
+        
+        return LyricsAnalysisResult(
+            themes=themes,
+            emotions=emotions,
+            story_elements=story_elements,
+            embeddings=line_embeddings.tolist(),
+            story_prompt=story_prompt
+        )
     
-    try:
-        # Get embeddings
-        embedding_result = embed_lyrics(lyrics_data)
-        sentence_embeddings = np.array(embedding_result["sentence_embeddings"])
-        sentences = embedding_result["sentences"]
+    def _extract_themes(self, lyrics: str) -> List[str]:
+        """Extract themes using keyword matching and semantic analysis"""
+        lyrics_lower = lyrics.lower()
+        detected_themes = []
         
-        # Cluster sentences to find thematic groups
-        if len(sentences) > 3:
-            n_clusters = min(3, len(sentences) // 2)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-            clusters = kmeans.fit_predict(sentence_embeddings)
-        else:
-            clusters = [0] * len(sentences)
+        for theme, keywords in self.theme_patterns.items():
+            score = sum(1 for keyword in keywords if keyword in lyrics_lower)
+            if score >= 2:  # Require multiple keyword matches
+                detected_themes.append(theme.replace("_", " "))
         
-        # Analyze themes based on keywords and semantic similarity
-        themes = []
-        emotions = []
-        story_elements = []
+        return detected_themes or ["personal journey"]
+    
+    def _extract_emotions(self, lyrics: str) -> List[str]:
+        """Extract emotional tone"""
+        lyrics_lower = lyrics.lower()
+        detected_emotions = []
         
-        lyrics_lower = lyrics_data.lyrics.lower()
-        
-        # Theme detection with expanded categories
-        theme_patterns = {
-            "love_romance": ["love", "heart", "kiss", "romance", "together", "forever", "baby", "darling"],
-            "loss_sadness": ["lost", "gone", "cry", "tears", "miss", "lonely", "hurt", "pain", "goodbye"],
-            "freedom_adventure": ["free", "fly", "run", "escape", "journey", "road", "wild", "adventure"],
-            "hope_dreams": ["hope", "dream", "wish", "believe", "future", "tomorrow", "light", "shine"],
-            "struggle_conflict": ["fight", "battle", "struggle", "war", "against", "overcome", "strength"],
-            "celebration": ["dance", "party", "celebrate", "joy", "happy", "music", "sing", "laugh"],
-            "nostalgia": ["remember", "past", "yesterday", "childhood", "used to", "old days", "memory"],
-            "spirituality": ["god", "heaven", "soul", "spirit", "pray", "faith", "angel", "divine"]
-        }
-        
-        for theme, keywords in theme_patterns.items():
+        for emotion, keywords in self.emotion_patterns.items():
             if any(keyword in lyrics_lower for keyword in keywords):
-                themes.append(theme.replace("_", " "))
+                detected_emotions.append(emotion)
         
-        # Emotion detection
-        emotion_patterns = {
-            "passionate": ["fire", "burn", "intense", "wild", "crazy", "mad"],
-            "melancholic": ["blue", "rain", "grey", "shadow", "dark", "cold"],
-            "euphoric": ["high", "fly", "sky", "up", "rise", "soar"],
-            "rebellious": ["break", "rules", "rebel", "against", "system", "fight"]
-        }
+        return detected_emotions or ["reflective"]
+    
+    def _extract_story_elements(self, lyrics: str, lines: List[str], embeddings: np.ndarray) -> Dict[str, List[str]]:
+        """Extract story elements using clustering and pattern matching"""
+        # Character detection
+        characters = []
+        pronouns = ["i", "you", "he", "she", "we", "they"]
+        roles = ["girl", "boy", "man", "woman", "child", "friend", "lover", "stranger"]
         
-        for emotion, keywords in emotion_patterns.items():
-            if any(keyword in lyrics_lower for keyword in keywords):
-                emotions.append(emotion)
-        
-        # Story element extraction
-        story_elements = {
-            "characters": [],
-            "settings": [],
-            "conflicts": [],
-            "resolutions": []
-        }
-        
-        # Simple character detection (pronouns and roles)
-        character_indicators = ["i", "you", "he", "she", "we", "they", "girl", "boy", "man", "woman"]
-        for indicator in character_indicators:
-            if indicator in lyrics_lower:
-                story_elements["characters"].append(indicator)
+        lyrics_lower = lyrics.lower()
+        for char in pronouns + roles:
+            if char in lyrics_lower:
+                characters.append(char)
         
         # Setting detection
-        setting_words = ["city", "town", "street", "home", "car", "beach", "mountain", "room", "bar", "club"]
-        for setting in setting_words:
-            if setting in lyrics_lower:
-                story_elements["settings"].append(setting)
+        settings = []
+        locations = ["city", "town", "home", "street", "car", "beach", "mountain", "room", "stage", "bar"]
+        for location in locations:
+            if location in lyrics_lower:
+                settings.append(location)
         
-        # Generate story prompt based on analysis
-        dominant_theme = themes[0] if themes else "personal journey"
-        dominant_emotion = emotions[0] if emotions else "reflective"
+        # Temporal elements
+        time_elements = []
+        time_words = ["night", "day", "morning", "evening", "summer", "winter", "tonight", "yesterday"]
+        for time_word in time_words:
+            if time_word in lyrics_lower:
+                time_elements.append(time_word)
         
-        story_prompt = f"A {dominant_emotion} story about {dominant_theme}"
-        if story_elements["settings"]:
-            story_prompt += f" set in {story_elements['settings'][0]}"
+        # Conflict/resolution patterns
+        conflicts = []
+        if any(word in lyrics_lower for word in ["fight", "struggle", "problem", "trouble", "conflict"]):
+            conflicts.append("internal struggle")
+        if any(word in lyrics_lower for word in ["against", "versus", "enemy", "opposition"]):
+            conflicts.append("external conflict")
         
         return {
-            "analysis": {
-                "themes": themes,
-                "emotions": emotions,
-                "story_elements": story_elements,
-                "sentence_clusters": {
-                    f"cluster_{i}": [sentences[j] for j, c in enumerate(clusters) if c == i]
-                    for i in range(max(clusters) + 1)
-                },
-                "dominant_theme": dominant_theme,
-                "dominant_emotion": dominant_emotion,
-                "story_prompt": story_prompt
-            },
-            "embeddings_info": {
-                "dimension": embedding_result["embedding_dimension"],
-                "num_sentences": len(sentences)
-            }
+            "characters": list(set(characters)),
+            "settings": list(set(settings)),
+            "time_elements": list(set(time_elements)),
+            "conflicts": conflicts
         }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Embedding analysis failed: {str(e)}")
-
-# Function 4: Generate story based on analyzed information
-@app.post("/generate-story/")
-def generate_story(lyrics_data: LyricsData, story_params: StoryParams = StoryParams()):
-    """Generate a story based on lyrics analysis"""
-    if story_pipeline is None:
-        raise HTTPException(status_code=500, detail="Story generation model not loaded")
     
-    try:
-        # First analyze the lyrics
-        analysis_result = analyze_embeddings(lyrics_data)
-        analysis = analysis_result["analysis"]
+    def _generate_story_prompt(self, themes: List[str], emotions: List[str], story_elements: Dict[str, List[str]]) -> str:
+        """Generate sophisticated story prompt"""
+        # Select primary theme and emotion
+        primary_theme = themes[0] if themes else "personal journey"
+        primary_emotion = emotions[0] if emotions else "reflective"
         
-        # Create a rich story prompt based on analysis
-        themes = analysis["themes"]
-        emotions = analysis["emotions"]
-        settings = analysis["story_elements"]["settings"]
+        # Build story elements
+        character_desc = "a person"
+        if "lover" in story_elements.get("characters", []):
+            character_desc = "two lovers"
+        elif "friend" in story_elements.get("characters", []):
+            character_desc = "close friends"
         
-        # Build narrative elements
-        if themes and emotions:
-            if "love romance" in themes:
-                story_setup = "Two people find an unexpected connection"
-            elif "loss sadness" in themes:
-                story_setup = "Someone learns to heal from a profound loss"
-            elif "freedom adventure" in themes:
-                story_setup = "A person breaks free from constraints to discover themselves"
-            else:
-                story_setup = "A character faces a life-changing moment"
-            
-            # Add emotional tone
-            if "passionate" in emotions:
-                tone_modifier = "with intense emotions and dramatic turns"
-            elif "melancholic" in emotions:
-                tone_modifier = "with bittersweet reflection and quiet wisdom"
-            elif "euphoric" in emotions:
-                tone_modifier = "filled with joy and triumphant moments"
-            else:
-                tone_modifier = "with deep personal growth"
-            
-            # Add setting if available
-            setting_desc = f" in {settings[0]}" if settings else " in an evocative location"
-            
-            formatted_prompt = f"Once upon a time, {story_setup} {setting_desc}, {tone_modifier}. "
+        setting_desc = ""
+        if story_elements.get("settings"):
+            setting_desc = f" in {story_elements['settings'][0]}"
+        
+        time_desc = ""
+        if story_elements.get("time_elements"):
+            time_desc = f" during {story_elements['time_elements'][0]}"
+        
+        # Construct prompt based on theme
+        if "love" in primary_theme:
+            base_story = f"{character_desc} discover unexpected love"
+        elif "loss" in primary_theme:
+            base_story = f"{character_desc} learn to heal from profound loss"
+        elif "freedom" in primary_theme:
+            base_story = f"{character_desc} break free from constraints"
+        elif "hope" in primary_theme:
+            base_story = f"{character_desc} find hope in darkness"
         else:
-            formatted_prompt = f"Once upon a time, {analysis['story_prompt']}. "
+            base_story = f"{character_desc} face a life-changing moment"
         
-        # Generate the story
+        # Add emotional modifier
+        if primary_emotion == "passionate":
+            emotion_modifier = "with intense emotions and dramatic revelations"
+        elif primary_emotion == "melancholic":
+            emotion_modifier = "with bittersweet reflection and quiet wisdom"
+        elif primary_emotion == "euphoric":
+            emotion_modifier = "filled with joy and triumphant moments"
+        else:
+            emotion_modifier = "with deep personal transformation"
+        
+        return f"{base_story}{setting_desc}{time_desc}, {emotion_modifier}"
+
+# Function 4: Enhanced Story Generation
+class StoryGenerator:
+    def __init__(self, story_pipeline):
+        self.story_pipeline = story_pipeline
+    
+    def generate_story(self, analysis: LyricsAnalysisResult, params: StoryParams) -> Dict[str, Any]:
+        """Generate story based on lyrics analysis"""
+        # Create rich narrative prompt
+        formatted_prompt = f"Once upon a time, {analysis.story_prompt}. "
+        
+        # Generate story with optimized parameters
         with torch.no_grad():
-            result = story_pipeline(
+            result = self.story_pipeline(
                 formatted_prompt,
-                max_length=story_params.max_length,
-                temperature=story_params.temperature,
+                max_length=params.max_length,
+                temperature=params.temperature,
+                top_p=params.top_p,
                 do_sample=True,
                 num_return_sequences=1,
-                pad_token_id=story_pipeline.tokenizer.pad_token_id
+                pad_token_id=self.story_pipeline.tokenizer.pad_token_id,
+                repetition_penalty=1.1,
+                length_penalty=1.0
             )
         
         generated_text = result[0]["generated_text"]
         
-        # Clean up the story
-        sentences = generated_text.split('. ')
-        if len(sentences) > 1 and not generated_text.rstrip().endswith('.'):
-            story_text = '. '.join(sentences[:-1]) + '.'
-        else:
-            story_text = generated_text
+        # Post-process story
+        story_text = self._clean_story(generated_text)
         
         return {
             "story": story_text,
             "inspiration": {
-                "themes": themes,
-                "emotions": emotions,
-                "story_elements": analysis["story_elements"]
+                "themes": analysis.themes,
+                "emotions": analysis.emotions,
+                "story_elements": analysis.story_elements
             },
             "generation_params": {
-                "max_length": story_params.max_length,
-                "temperature": story_params.temperature,
-                "prompt_used": formatted_prompt
+                "prompt": analysis.story_prompt,
+                "max_length": params.max_length,
+                "temperature": params.temperature
             }
         }
+    
+    def _clean_story(self, text: str) -> str:
+        """Clean and format the generated story"""
+        # Remove prompt if included
+        if text.startswith("Once upon a time, "):
+            story_start = text.find(". ") + 2
+            if story_start < len(text):
+                text = "Once upon a time, " + text[story_start:]
         
+        # Ensure proper sentence endings
+        sentences = text.split('. ')
+        if len(sentences) > 1 and not text.rstrip().endswith('.'):
+            text = '. '.join(sentences[:-1]) + '.'
+        
+        # Basic formatting
+        text = re.sub(r'\n+', ' ', text)  # Remove excessive newlines
+        text = re.sub(r' +', ' ', text)   # Remove excessive spaces
+        
+        return text.strip()
+
+# Initialize components
+lyrics_fetcher = LyricsFetcher()
+lyrics_analyzer = None
+story_generator = None
+
+@app.on_event("startup")
+async def initialize_components():
+    global lyrics_analyzer, story_generator
+    await load_models()
+    lyrics_analyzer = LyricsAnalyzer(embedding_model)
+    story_generator = StoryGenerator(story_pipeline)
+
+# API Endpoints
+@app.get("/")
+def read_root():
+    return {
+        "message": "Advanced Lyrics-to-Story Generator API",
+        "pipeline": [
+            "1. Fetch lyrics from multiple sources (Genius, AZLyrics)",
+            "2. Generate embeddings and analyze themes/emotions",
+            "3. Extract story elements and create narrative prompt",
+            "4. Generate compelling story based on musical inspiration"
+        ],
+        "endpoints": {
+            "/fetch-lyrics/": "Fetch lyrics from web sources",
+            "/analyze-lyrics/": "Combined embedding and analysis",
+            "/generate-story-from-lyrics/": "Generate story from lyrics text",
+            "/song-to-story/": "Complete pipeline: song info to story"
+        }
+    }
+
+@app.post("/fetch-lyrics/")
+async def fetch_lyrics_endpoint(song_request: SongRequest):
+    """Fetch lyrics using multiple web sources"""
+    result = await lyrics_fetcher.fetch_lyrics(song_request.title, song_request.artist)
+    
+    if not result["success"]:
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Could not find lyrics for '{song_request.title}' by {song_request.artist}"
+        )
+    
+    return result
+
+@app.post("/analyze-lyrics/")
+def analyze_lyrics_endpoint(lyrics: str):
+    """Combined embedding generation and analysis"""
+    if not lyrics_analyzer:
+        raise HTTPException(status_code=500, detail="Analyzer not initialized")
+    
+    try:
+        analysis = lyrics_analyzer.embed_and_analyze(lyrics)
+        return {
+            "analysis": analysis.dict(),
+            "embedding_info": {
+                "dimension": len(analysis.embeddings[0]) if analysis.embeddings else 0,
+                "num_segments": len(analysis.embeddings)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@app.post("/generate-story-from-lyrics/")
+def generate_story_from_lyrics(lyrics: str, params: StoryParams = StoryParams()):
+    """Generate story from lyrics text"""
+    if not lyrics_analyzer or not story_generator:
+        raise HTTPException(status_code=500, detail="Components not initialized")
+    
+    try:
+        analysis = lyrics_analyzer.embed_and_analyze(lyrics)
+        story_result = story_generator.generate_story(analysis, params)
+        return story_result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Story generation failed: {str(e)}")
 
-# Complete pipeline: Song to Story
-@app.post("/generate-story-from-song/")
-def generate_story_from_song(request: StoryGenerationRequest):
-    """Complete pipeline: Fetch lyrics, analyze, and generate story"""
+@app.post("/song-to-story/")
+async def song_to_story_complete_pipeline(
+    song_request: SongRequest, 
+    params: StoryParams = StoryParams()
+):
+    """Complete pipeline: Song information to generated story"""
     try:
         # Step 1: Fetch lyrics
-        song_request = SongRequest(title=request.song_title, artist=request.artist)
-        lyrics_result = fetch_lyrics(song_request)
+        lyrics_result = await lyrics_fetcher.fetch_lyrics(song_request.title, song_request.artist)
         
         if not lyrics_result["success"]:
-            raise HTTPException(status_code=404, detail="Could not fetch lyrics")
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Could not fetch lyrics for '{song_request.title}' by {song_request.artist}"
+            )
         
-        # Step 2-4: Analyze and generate story
-        lyrics_data = LyricsData(lyrics=lyrics_result["lyrics"])
-        story_result = generate_story(lyrics_data, request.story_params)
+        # Step 2: Analyze lyrics
+        analysis = lyrics_analyzer.embed_and_analyze(lyrics_result["lyrics"])
+        
+        # Step 3: Generate story
+        story_result = story_generator.generate_story(analysis, params)
         
         return {
             "song_info": {
-                "title": request.song_title,
-                "artist": request.artist
+                "title": song_request.title,
+                "artist": song_request.artist,
+                "lyrics_source": lyrics_result["source"]
             },
-            "lyrics_source": lyrics_result["source"],
+            "analysis": analysis.dict(),
             "story": story_result["story"],
-            "analysis": story_result["inspiration"],
-            "generation_info": story_result["generation_params"]
+            "inspiration": story_result["inspiration"],
+            "generation_params": story_result["generation_params"]
         }
         
     except Exception as e:
@@ -384,16 +515,12 @@ def generate_story_from_song(request: StoryGenerationRequest):
 def health_check():
     return {
         "status": "healthy",
-        "models_loaded": {
-            "embedding": embedding_model is not None,
-            "story": story_pipeline is not None
-        },
-        "functions_available": [
-            "fetch_lyrics",
-            "embed_lyrics", 
-            "analyze_embeddings",
-            "generate_story"
-        ]
+        "components": {
+            "embedding_model": embedding_model is not None,
+            "story_pipeline": story_pipeline is not None,
+            "lyrics_analyzer": lyrics_analyzer is not None,
+            "story_generator": story_generator is not None
+        }
     }
 
 if __name__ == "__main__":

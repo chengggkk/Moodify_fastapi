@@ -4,48 +4,60 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
 import openai
 
 load_dotenv()
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
+SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
+# Initialize FastAPI and embedding model
 app = FastAPI()
+embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
-class SongRequest(BaseModel):
-    title: str
-    artist: str
-
-# --- Step 1: Search & Scrape from lyrics.com ---
+# --- Step 1: Search and Scrape Lyrics ---
 def fetch_lyrics(song: str, artist: str) -> str:
-    search_url = f"https://www.lyrics.com/serp.php?st={requests.utils.quote(song)}&qtype=2"
-    response = requests.get(search_url)
-    soup = BeautifulSoup(response.text, "html.parser")
+    query = f"{song} {artist} lyrics"
+    search_url = f"https://serpapi.com/search.json?q={query}&api_key={SERPAPI_KEY}&engine=google"
 
-    # Find first result that matches artist
-    links = soup.select("td.tal.qx > strong > a")
-    for link in links:
-        title = link.text.strip().lower()
-        song_link = link["href"]
-        parent_row = link.find_parent("tr")
-        if artist.lower() in parent_row.text.lower():
-            lyrics_url = f"https://www.lyrics.com{song_link}"
-            return scrape_lyrics_from_url(lyrics_url)
-
+    response = requests.get(search_url).json()
+    for result in response.get("organic_results", []):
+        url = result.get("link", "")
+        if "lyrics" in url:
+            lyrics = scrape_lyrics(url)
+            if lyrics:
+                return lyrics
     return "Lyrics not found."
 
-def scrape_lyrics_from_url(url: str) -> str:
-    res = requests.get(url)
-    soup = BeautifulSoup(res.text, "html.parser")
-    lyrics_div = soup.find("pre", {"id": "lyric-body-text"})
-    if lyrics_div:
-        return lyrics_div.get_text(separator="\n").strip()
-    return ""
+def scrape_lyrics(url: str) -> str:
+    try:
+        res = requests.get(url)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        paragraphs = soup.find_all("p")
+        lyrics = "\n".join(p.get_text() for p in paragraphs if len(p.get_text()) > 30)
+        return lyrics
+    except Exception:
+        return ""
 
-# --- Step 2: Analyze with OpenAI Embedding + GPT ---
-def analyze_lyrics(lyrics: str) -> str:
-    # You can add embedding if needed
-    prompt = f"Analyze the tone, themes, and emotional meaning of the following song lyrics:\n\n{lyrics[:1500]}"
+# --- Step 2: Embed with Hugging Face ---
+def embed_lyrics(lyrics: str) -> list:
+    return embedding_model.encode(lyrics, convert_to_numpy=True).tolist()
+
+# --- Step 3: Analyze with OpenAI ---
+def analyze_lyrics(lyrics: str, embedding: list) -> str:
+    prompt = f"""
+Below are song lyrics and their semantic embedding vector.
+Analyze the tone, mood, and main theme of the lyrics. Use both the text and embedding for a deep understanding.
+
+Lyrics:
+{lyrics[:1000]}
+
+Embedding (shortened):
+{embedding[:10]}...
+
+Provide a concise analysis in 3-5 sentences.
+"""
     completion = openai.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
@@ -53,9 +65,9 @@ def analyze_lyrics(lyrics: str) -> str:
     )
     return completion.choices[0].message.content.strip()
 
-# --- Step 3: Generate a Story ---
+# --- Step 4: Generate Story ---
 def generate_story(analysis: str) -> str:
-    prompt = f"Based on the following analysis of a song's lyrics, write a short creative story with similar mood and themes:\n\n{analysis}"
+    prompt = f"Based on this song analysis:\n\n{analysis}\n\nWrite a creative short story that reflects the same themes and emotions."
     completion = openai.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
@@ -63,18 +75,24 @@ def generate_story(analysis: str) -> str:
     )
     return completion.choices[0].message.content.strip()
 
-# --- API Endpoint ---
-@app.post("/generate-story")
-def generate(request: SongRequest):
-    lyrics = fetch_lyrics(request.title, request.artist)
-    if not lyrics or "Lyrics not found" in lyrics:
-        return {"error": "Lyrics not found."}
+# --- Request Schema ---
+class SongRequest(BaseModel):
+    title: str
+    artist: str
 
-    analysis = analyze_lyrics(lyrics)
+# --- FastAPI Endpoint ---
+@app.post("/generate-story")
+def process_song(request: SongRequest):
+    lyrics = fetch_lyrics(request.title, request.artist)
+    if "Lyrics not found" in lyrics:
+        return {"error": "Could not find lyrics."}
+
+    embedding = embed_lyrics(lyrics)
+    analysis = analyze_lyrics(lyrics, embedding)
     story = generate_story(analysis)
 
     return {
-        "lyrics": lyrics[:400] + "...",
+        "lyrics_snippet": lyrics[:500] + "...",
         "analysis": analysis,
         "story": story
     }

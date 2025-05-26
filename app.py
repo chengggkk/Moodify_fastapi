@@ -35,9 +35,8 @@ model = AutoModel.from_pretrained(
 
 # --- Step 1: Fetch lyrics ---
 def fetch_lyrics(song: str, artist: str) -> str:
-    search_query = f"{song} {artist} 歌词"
-    encoded_query = urllib.parse.quote(search_query)
-    serp_url = f"https://serpapi.com/search.json?engine=google&q={encoded_query}&api_key={SERPAPI_KEY}"
+    search_query = f"{song} {artist} lyrics"
+    serp_url = f"https://serpapi.com/search.json?engine=google&q={search_query}&api_key={SERPAPI_KEY}"
 
     response = requests.get(serp_url).json()
     for result in response.get("organic_results", []):

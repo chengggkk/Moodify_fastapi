@@ -33,20 +33,34 @@ model = AutoModel.from_pretrained(
     trust_remote_code=True,
 ).to(device)
 
-# 抓歌詞，先用 SerpAPI 搜尋，再用 BeautifulSoup 抓取內容
 def fetch_lyrics(song: str, artist: str) -> str:
     query = f"{song} {artist} lyrics"
-    serp_url = f"https://serpapi.com/search.json?engine=google&q={requests.utils.quote(query)}&api_key={SERPAPI_KEY}"
-    resp = requests.get(serp_url)
-    if resp.status_code != 200:
-        return "Lyrics not found."
-    data = resp.json()
-    for result in data.get("organic_results", []):
-        link = result.get("link", "")
-        if any(keyword in link for keyword in ["lyrics", "歌词"]):
-            lyrics = scrape_lyrics(link)
-            if lyrics:
-                return lyrics
+    search_url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
+    }
+
+    res = requests.get(search_url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    # 抓出所有搜尋結果的連結
+    search_results = soup.select("a")
+    links = []
+    for a_tag in search_results:
+        href = a_tag.get("href", "")
+        if "/url?q=" in href:
+            url = href.split("/url?q=")[1].split("&")[0]
+            if "lyrics" in url or "lyric" in url or "歌词" in url:
+                links.append(url)
+
+    # 測試前幾個可能的歌詞頁面
+    for link in links[:3]:
+        print("Trying:", link)
+        lyrics = scrape_lyrics(link)
+        if lyrics and len(lyrics.split()) > 30:
+            return lyrics
+
     return "Lyrics not found."
 
 def scrape_lyrics(url: str) -> str:

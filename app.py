@@ -71,6 +71,11 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
         data = response.json()
         print("SerpAPI search completed")
         
+        # Debug: Print what we got
+        print(f"Knowledge graph available: {bool(data.get('knowledge_graph'))}")
+        print(f"Organic results count: {len(data.get('organic_results', []))}")
+        print(f"Answer box available: {bool(data.get('answer_box'))}")
+        
         lyrics_content = None
         
         # Check knowledge graph for direct lyrics
@@ -80,6 +85,10 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
         
         # Check organic results for lyrics sites
         if not lyrics_content and data.get("organic_results"):
+            # Print first few results for debugging
+            for i, result in enumerate(data["organic_results"][:5]):
+                print(f"Result {i+1}: {result.get('title', 'No title')} - {result.get('link', 'No link')}")
+            
             lyrics_urls = [
                 result for result in data["organic_results"]
                 if result.get("link") and (
@@ -90,13 +99,17 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
                 )
             ][:3]  # Try first 3 results
             
+            print(f"Found {len(lyrics_urls)} lyrics sites to try")
+            
             for result in lyrics_urls:
                 try:
                     print(f"Trying to fetch from: {result['link']}")
                     lyrics_content = scrape_lyrics_from_url(result["link"])
                     if lyrics_content and len(lyrics_content.split()) > 30:
                         print("Successfully fetched lyrics from URL")
-                        break
+                        return lyrics_content  # Return immediately when found
+                    else:
+                        print(f"Lyrics too short or empty from {result['link']}")
                 except Exception as e:
                     print(f"Failed to fetch from {result['link']}: {e}")
                     continue
@@ -106,7 +119,13 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
             if data["answer_box"].get("snippet"):
                 lyrics_content = data["answer_box"]["snippet"]
                 print("Found lyrics in answer box")
+                print(f"Answer box snippet length: {len(lyrics_content)}")
         
+        if lyrics_content:
+            print(f"Final lyrics content length: {len(lyrics_content)} chars, {len(lyrics_content.split())} words")
+        else:
+            print("No lyrics content found from any source")
+            
         return lyrics_content
         
     except Exception as e:
@@ -114,7 +133,7 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
         return None
 
 def scrape_lyrics_from_url(url: str) -> str:
-    """Enhanced lyrics scraper for various sites"""
+    """Enhanced lyrics scraper matching JavaScript approach"""
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -122,38 +141,61 @@ def scrape_lyrics_from_url(url: str) -> str:
         
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
+            print(f"HTTP {response.status_code} for {url}")
             return None
             
         html = response.text
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Remove unwanted elements
-        for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
-            element.decompose()
-        
         lyrics = ""
         
         if "genius.com" in url:
-            # Extract from Genius using multiple selectors
-            selectors = [
-                '[data-lyrics-container="true"]',
-                '.Lyrics__Container-sc-1ynbvzw-1',
-                '[class*="Lyrics__Container"]',
-                '.lyrics'
-            ]
+            print("Processing Genius.com URL...")
+            # Use regex approach like JavaScript version
+            lyrics_matches = re.findall(
+                r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>', 
+                html, 
+                re.DOTALL | re.IGNORECASE
+            )
             
-            for selector in selectors:
-                elements = soup.select(selector)
-                if elements:
-                    lyrics = '\n'.join(
-                        element.get_text(separator='\n', strip=True) 
-                        for element in elements
-                    )
-                    break
-                    
+            if lyrics_matches:
+                print(f"Found {len(lyrics_matches)} lyrics containers")
+                lyrics_parts = []
+                for match in lyrics_matches:
+                    # Remove HTML tags and clean up
+                    clean_text = re.sub(r'<[^>]*>', '', match).strip()
+                    if clean_text:
+                        lyrics_parts.append(clean_text)
+                lyrics = '\n'.join(lyrics_parts)
+                print(f"Extracted lyrics length: {len(lyrics)}")
+            
+            # Fallback: try other selectors with BeautifulSoup
+            if not lyrics or len(lyrics.split()) < 30:
+                print("Trying BeautifulSoup fallback for Genius...")
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Try multiple selectors
+                selectors = [
+                    '[data-lyrics-container="true"]',
+                    'div[data-lyrics-container]',
+                    '.Lyrics__Container-sc-1ynbvzw-1',
+                    '[class*="Lyrics__Container"]',
+                    '.lyrics',
+                    'div[class*="lyrics"]'
+                ]
+                
+                for selector in selectors:
+                    elements = soup.select(selector)
+                    if elements:
+                        print(f"Found elements with selector: {selector}")
+                        lyrics = '\n'.join(
+                            element.get_text(separator='\n', strip=True) 
+                            for element in elements
+                        )
+                        if lyrics and len(lyrics.split()) > 30:
+                            break
+                        
         elif "azlyrics.com" in url:
-            # Extract from AZLyrics pattern
-            # Look for the comment pattern that indicates lyrics start
+            print("Processing AZLyrics URL...")
+            # Use regex approach like JavaScript version
             lyrics_match = re.search(
                 r'<!-- Usage of azlyrics\.com content.*?-->(.*?)<!-- MxM banner -->',
                 html,
@@ -161,65 +203,43 @@ def scrape_lyrics_from_url(url: str) -> str:
             )
             if lyrics_match:
                 lyrics_html = lyrics_match.group(1)
-                lyrics_soup = BeautifulSoup(lyrics_html, 'html.parser')
-                lyrics = lyrics_soup.get_text(separator='\n', strip=True)
-            else:
-                # Fallback: look for divs without class/id (AZLyrics style)
-                divs = soup.find_all('div', {'class': False, 'id': False})
-                for div in divs:
-                    text = div.get_text(strip=True)
-                    if len(text) > 200 and '\n' in text:
-                        lyrics = text
-                        break
-                        
+                lyrics = re.sub(r'<[^>]*>', '', lyrics_html).strip()
+                print(f"AZLyrics extracted length: {len(lyrics)}")
+        
         else:
-            # Generic extraction for other sites
-            # Try common lyrics selectors
-            selectors = [
-                '.lyrics', '.lyric-body', '.song-lyrics', 
-                '#lyrics', '.lyricsh', '[class*="lyric"]'
-            ]
-            
-            for selector in selectors:
-                elements = soup.select(selector)
-                if elements:
-                    lyrics = '\n'.join(
-                        element.get_text(separator='\n', strip=True) 
-                        for element in elements
-                    )
-                    break
-            
-            # If no specific selectors work, try to find large text blocks
-            if not lyrics:
-                all_divs = soup.find_all('div')
+            print("Processing generic lyrics site...")
+            # Generic extraction - look for large text blocks like JavaScript
+            text_blocks = re.findall(r'<div[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
+            if text_blocks:
                 candidates = []
-                
-                for div in all_divs:
-                    text = div.get_text(separator='\n', strip=True)
-                    # Filter for text that looks like lyrics
-                    if (len(text) > 200 and 
-                        text.count('\n') > 5 and 
-                        len(text.split()) > 50):
-                        candidates.append(text)
+                for block in text_blocks:
+                    clean_text = re.sub(r'<[^>]*>', '', block).strip()
+                    if len(clean_text) > 200 and '\n' in clean_text:
+                        candidates.append(clean_text)
                 
                 if candidates:
-                    # Return the longest candidate
-                    lyrics = max(candidates, key=len)
+                    # Sort by length and take the longest
+                    candidates.sort(key=len, reverse=True)
+                    lyrics = candidates[0]
+                    print(f"Generic extraction length: {len(lyrics)}")
         
         # Clean up the lyrics
         if lyrics:
+            # Remove extra whitespace and empty lines
             lines = [line.strip() for line in lyrics.split('\n') if line.strip()]
             lyrics = '\n'.join(lines)
             
             # Remove common unwanted patterns
             unwanted_patterns = [
-                r'advertisement',
-                r'sponsor',
-                r'click here',
-                r'www\.',
-                r'\.com',
-                r'copyright',
-                r'all rights reserved'
+                r'advertisement.*',
+                r'sponsor.*',
+                r'click here.*',
+                r'www\..*',
+                r'\.com.*',
+                r'copyright.*',
+                r'all rights reserved.*',
+                r'embed.*',
+                r'share.*'
             ]
             
             for pattern in unwanted_patterns:
@@ -228,6 +248,8 @@ def scrape_lyrics_from_url(url: str) -> str:
             # Final cleanup
             lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)  # Remove excessive newlines
             lyrics = lyrics.strip()
+            
+            print(f"Final cleaned lyrics length: {len(lyrics)} characters, {len(lyrics.split())} words")
         
         return lyrics if lyrics and len(lyrics.split()) > 30 else None
         

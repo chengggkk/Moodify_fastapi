@@ -743,7 +743,7 @@ WHAT MAKES THIS ANALYSIS EXTRAORDINARY:
 - Spark creative fire for story generation
 - Transform lyrics into creative rocket fuel
 
-Please provide your creative analysis in Chinese, focusing on unlocking maximum storytelling potential and creative inspiration.
+Please provide your creative analysis in English, focusing on unlocking maximum storytelling potential and creative inspiration. Use vivid, inspiring language that captures the essence of creative possibility.
 """
 
         lyrics_completion = openai.chat.completions.create(
@@ -825,7 +825,7 @@ INSPIRATIONAL EXAMPLES OF EXTRAORDINARY STORYTELLING:
 CREATIVE MISSION STATEMENT:
 Write a story that doesn't just tell - it enchants. Create something that makes readers believe in the magic of storytelling again. Use every tool of creative expression to build an unforgettable narrative experience.
 
-Generate your masterpiece story in Chinese, demonstrating peak creative storytelling that transforms the source analysis into pure narrative gold. Make it substantial (800-1200 characters minimum) and absolutely captivating.
+Generate your masterpiece story in English, demonstrating peak creative storytelling that transforms the source analysis into pure narrative gold. Make it substantial (800-1200 words minimum) and absolutely captivating. Use rich, evocative language that brings the story to life.
 """
         
         story_completion = openai.chat.completions.create(

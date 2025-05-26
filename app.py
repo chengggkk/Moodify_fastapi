@@ -22,6 +22,21 @@ openai.api_key = OPENAI_API_KEY
 
 app = FastAPI()
 
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy", "message": "API is running"}
+
+# Test endpoint
+@app.get("/test-embedding")
+def test_embedding():
+    try:
+        test_text = "This is a test"
+        embedding = embed_texts(test_text)
+        return {"status": "success", "embedding_length": len(embedding), "text": test_text}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load tokenizer and model
@@ -169,11 +184,17 @@ def mood_analysis_api(req: MoodAnalysisRequest):
     API for mood analysis using embedding and mood analysis functions.
     """
     try:
+        print(f"Received text length: {len(req.text)}")
+        
         # Generate embedding
+        print("Generating embedding...")
         embedding = embed_texts(req.text)
+        print(f"Embedding generated with {len(embedding)} dimensions")
         
         # Analyze mood
+        print("Analyzing mood...")
         mood_analysis = analyze_mood(req.text, embedding)
+        print(f"Mood analysis completed: {mood_analysis[:100]}...")
         
         return {
             "text_snippet": req.text[:200] + "..." if len(req.text) > 200 else req.text,
@@ -181,7 +202,10 @@ def mood_analysis_api(req: MoodAnalysisRequest):
             "embedding_dimensions": len(embedding)
         }
     except Exception as e:
-        return {"error": f"Error analyzing mood: {str(e)}"}
+        print(f"Error in mood analysis: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Error analyzing mood: {str(e)}", "type": type(e).__name__}
 
 # API 2: Story generation (embedding function + lyrics analyze function + story generation)
 @app.post("/generate-story")
@@ -190,14 +214,22 @@ def story_generation_api(req: StoryGenerationRequest):
     API for story generation using embedding, lyrics analysis, and story generation functions.
     """
     try:
+        print(f"Received lyrics length: {len(req.lyrics)}")
+        
         # Generate embedding
+        print("Generating embedding...")
         embedding = embed_texts(req.lyrics)
+        print(f"Embedding generated with {len(embedding)} dimensions")
         
         # Analyze lyrics
+        print("Analyzing lyrics...")
         lyrics_analysis = analyze_lyrics(req.lyrics, embedding)
+        print(f"Lyrics analysis completed: {lyrics_analysis[:100]}...")
         
         # Generate story
+        print("Generating story...")
         story = generate_story(lyrics_analysis)
+        print(f"Story generated: {story[:100]}...")
         
         return {
             "lyrics_snippet": req.lyrics[:200] + "..." if len(req.lyrics) > 200 else req.lyrics,
@@ -206,7 +238,10 @@ def story_generation_api(req: StoryGenerationRequest):
             "embedding_dimensions": len(embedding)
         }
     except Exception as e:
-        return {"error": f"Error generating story: {str(e)}"}
+        print(f"Error in story generation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"error": f"Error generating story: {str(e)}", "type": type(e).__name__}
 
 if __name__ == "__main__":
     import uvicorn

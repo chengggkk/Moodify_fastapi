@@ -82,10 +82,11 @@ def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
         if not lyrics_content and data.get("organic_results"):
             lyrics_urls = [
                 result for result in data["organic_results"]
-                if result.get("link") and any(
-                    site in result["link"] for site in [
-                        "genius.com", "azlyrics.com", "lyrics.com", "metrolyrics.com"
-                    ]
+                if result.get("link") and (
+                    result["link"].find("genius.com") != -1 or
+                    result["link"].find("azlyrics.com") != -1 or
+                    result["link"].find("lyrics.com") != -1 or
+                    result["link"].find("metrolyrics.com") != -1
                 )
             ][:3]  # Try first 3 results
             
@@ -309,6 +310,8 @@ def clean_lyrics_basic(raw_lyrics: str) -> str:
 def try_fallback_methods(song: str, artist: str) -> str:
     """Fallback methods if SerpAPI fails"""
     try:
+        print(f"Trying fallback methods for: {artist} - {song}")
+        
         # Try some direct site approaches as last resort
         fallback_sources = []
         

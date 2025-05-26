@@ -5,8 +5,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
-from transformers import AutoTokenizer, AutoModel
 import torch
+from transformers import AutoTokenizer, AutoModel
 import openai
 
 # Load environment variables
@@ -19,15 +19,18 @@ openai.api_key = OPENAI_API_KEY
 
 app = FastAPI()
 
-# Load Jina Embedding model (replacing DeepSeek)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 tokenizer = AutoTokenizer.from_pretrained(
     "jinaai/jina-embeddings-v3",
-    token=HF_API_KEY
+    token=HF_API_KEY,
+    trust_remote_code=True,
 )
+
 model = AutoModel.from_pretrained(
     "jinaai/jina-embeddings-v3",
-    token=HF_API_KEY
+    token=HF_API_KEY,
+    trust_remote_code=True,
 ).to(device)
 
 # --- Step 1: Fetch lyrics ---
@@ -56,18 +59,24 @@ def scrape_lyrics(url: str) -> str:
         return ""
 
 # --- Step 2: Embed lyrics using Jina ---
-def embed_lyrics(text: str) -> list:
-    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
+def embed_lyrics(text: str, task: str = "text-matching", max_length: int = 2048, truncate_dim: int = 768) -> list:
+    # Tokenize and move to device
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+    ).to(device)
+
     with torch.no_grad():
-        outputs = model(**inputs)
-        # Mean Pooling: recommended for Jina embeddings
-        attention_mask = inputs['attention_mask']
-        token_embeddings = outputs.last_hidden_state
-        input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
-        sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-        embeddings = sum_embeddings / sum_mask
-        return embeddings[0].cpu().tolist()
+        outputs = model.encode(
+            text if isinstance(text, list) else [text],
+            task=task,
+            max_length=max_length,
+            truncate_dim=truncate_dim,
+        )
+    return outputs[0].cpu().tolist()
 
 # --- Step 3: Analyze with OpenAI ---
 def analyze_lyrics(lyrics: str, embedding: list) -> str:

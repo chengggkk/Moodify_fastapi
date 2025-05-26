@@ -1,5 +1,6 @@
 import os
 import requests
+import urllib.parse
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv

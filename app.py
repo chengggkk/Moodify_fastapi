@@ -1,4 +1,5 @@
 import os
+import urllib.parse
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -7,30 +8,38 @@ from bs4 import BeautifulSoup
 from transformers import AutoTokenizer, AutoModel
 import torch
 import openai
-import urllib.parse
-
-load_dotenv()
-app = FastAPI()
 
 # Load environment variables
-openai.api_key = os.getenv("OPENAI_API_KEY")
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
 
-# Load DeepSeek embedding model
+openai.api_key = OPENAI_API_KEY
+
+app = FastAPI()
+
+# Load DeepSeek embedding model using Hugging Face API token
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-embedding-2")
-model = AutoModel.from_pretrained("deepseek-ai/deepseek-embedding-2").to(device)
+tokenizer = AutoTokenizer.from_pretrained(
+    "deepseek-ai/deepseek-embedding-2",
+    use_auth_token=HF_API_KEY
+)
+model = AutoModel.from_pretrained(
+    "deepseek-ai/deepseek-embedding-2",
+    use_auth_token=HF_API_KEY
+).to(device)
 
-# --- Step 1: Fetch lyrics from SerpAPI ---
+# --- Step 1: Fetch lyrics ---
 def fetch_lyrics(song: str, artist: str) -> str:
-    search_query = f"{song} {artist} lyrics"
+    search_query = f"{song} {artist} 歌词"
     encoded_query = urllib.parse.quote(search_query)
     serp_url = f"https://serpapi.com/search.json?engine=google&q={encoded_query}&api_key={SERPAPI_KEY}"
 
     response = requests.get(serp_url).json()
     for result in response.get("organic_results", []):
         url = result.get("link", "")
-        if "lyrics" in url or "歌詞" in url:
+        if "lyrics" in url or "歌词" in url:
             lyrics = scrape_lyrics(url)
             if lyrics:
                 return lyrics

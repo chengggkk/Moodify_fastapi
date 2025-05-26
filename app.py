@@ -1,27 +1,20 @@
 import os
-import requests
-import urllib.parse
+import torch
+from typing import Union, List
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-import torch
 from transformers import AutoTokenizer, AutoModel
 import openai
-import re
-import time
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 HF_API_KEY = os.getenv("HF_API_KEY")
 
 # Validate required API keys
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY is missing from environment variables")
-if not SERPAPI_KEY:
-    raise ValueError("SERPAPI_KEY is missing from environment variables")
 if not HF_API_KEY:
     raise ValueError("HF_API_KEY is missing from environment variables")
 
@@ -31,7 +24,7 @@ app = FastAPI()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 載入 tokenizer 和 model
+# Load tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(
     "jinaai/jina-embeddings-v3",
     token=HF_API_KEY,
@@ -44,371 +37,87 @@ model = AutoModel.from_pretrained(
     trust_remote_code=True,
 ).to(device)
 
-def clean_text(text):
-    """Clean and normalize text for better matching"""
-    return re.sub(r'[^\w\s]', '', text.lower().strip())
+# 1. Embedding function
+def embed_texts(texts: Union[str, List[str]]) -> List[float]:
+    """
+    Generate embedding vectors for English and Chinese texts using jinaai/jina-embeddings-v3.
 
-def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
-    """Fetch lyrics using SerpAPI Google Search"""
-    try:
-        print(f"Fetching lyrics via SerpAPI: {artist} - {song}")
-        
-        # Search for lyrics using SerpAPI
-        search_query = f"{artist} {song} lyrics"
-        serp_url = "https://serpapi.com/search.json"
-        
-        params = {
-            "engine": "google",
-            "q": search_query,
-            "api_key": SERPAPI_KEY
-        }
-        
-        response = requests.get(serp_url, params=params, timeout=15)
-        if response.status_code != 200:
-            print(f"SerpAPI request failed: {response.status_code}")
-            return None
-            
-        data = response.json()
-        print("SerpAPI search completed")
-        
-        # Debug: Print what we got
-        print(f"Knowledge graph available: {bool(data.get('knowledge_graph'))}")
-        print(f"Organic results count: {len(data.get('organic_results', []))}")
-        print(f"Answer box available: {bool(data.get('answer_box'))}")
-        
-        lyrics_content = None
-        
-        # Check knowledge graph for direct lyrics
-        if data.get("knowledge_graph") and data["knowledge_graph"].get("lyrics"):
-            lyrics_content = data["knowledge_graph"]["lyrics"]
-            print("Found lyrics in knowledge graph")
-        
-        # Check organic results for lyrics sites
-        if not lyrics_content and data.get("organic_results"):
-            # Print first few results for debugging
-            for i, result in enumerate(data["organic_results"][:5]):
-                print(f"Result {i+1}: {result.get('title', 'No title')} - {result.get('link', 'No link')}")
-            
-            lyrics_urls = [
-                result for result in data["organic_results"]
-                if result.get("link") and (
-                    result["link"].find("genius.com") != -1 or
-                    result["link"].find("azlyrics.com") != -1 or
-                    result["link"].find("lyrics.com") != -1 or
-                    result["link"].find("metrolyrics.com") != -1
-                )
-            ][:3]  # Try first 3 results
-            
-            print(f"Found {len(lyrics_urls)} lyrics sites to try")
-            
-            for result in lyrics_urls:
-                try:
-                    print(f"Trying to fetch from: {result['link']}")
-                    lyrics_content = scrape_lyrics_from_url(result["link"])
-                    if lyrics_content and len(lyrics_content.split()) > 30:
-                        print("Successfully fetched lyrics from URL")
-                        return lyrics_content  # Return immediately when found
-                    else:
-                        print(f"Lyrics too short or empty from {result['link']}")
-                except Exception as e:
-                    print(f"Failed to fetch from {result['link']}: {e}")
-                    continue
-        
-        # Check answer box or featured snippet
-        if not lyrics_content and data.get("answer_box"):
-            if data["answer_box"].get("snippet"):
-                lyrics_content = data["answer_box"]["snippet"]
-                print("Found lyrics in answer box")
-                print(f"Answer box snippet length: {len(lyrics_content)}")
-        
-        if lyrics_content:
-            print(f"Final lyrics content length: {len(lyrics_content)} chars, {len(lyrics_content.split())} words")
-        else:
-            print("No lyrics content found from any source")
-            
-        return lyrics_content
-        
-    except Exception as e:
-        print(f"SerpAPI lyrics fetch error: {e}")
-        return None
+    Args:
+        texts (Union[str, List[str]]): A single string or a list of strings (English or Chinese).
 
-def scrape_lyrics_from_url(url: str) -> str:
-    """Enhanced lyrics scraper matching JavaScript approach"""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            print(f"HTTP {response.status_code} for {url}")
-            return None
-            
-        html = response.text
-        lyrics = ""
-        
-        if "genius.com" in url:
-            print("Processing Genius.com URL...")
-            # Use regex approach like JavaScript version
-            lyrics_matches = re.findall(
-                r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>', 
-                html, 
-                re.DOTALL | re.IGNORECASE
-            )
-            
-            if lyrics_matches:
-                print(f"Found {len(lyrics_matches)} lyrics containers")
-                lyrics_parts = []
-                for match in lyrics_matches:
-                    # Remove HTML tags and clean up
-                    clean_text = re.sub(r'<[^>]*>', '', match).strip()
-                    if clean_text:
-                        lyrics_parts.append(clean_text)
-                lyrics = '\n'.join(lyrics_parts)
-                print(f"Extracted lyrics length: {len(lyrics)}")
-            
-            # Fallback: try other selectors with BeautifulSoup
-            if not lyrics or len(lyrics.split()) < 30:
-                print("Trying BeautifulSoup fallback for Genius...")
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # Try multiple selectors
-                selectors = [
-                    '[data-lyrics-container="true"]',
-                    'div[data-lyrics-container]',
-                    '.Lyrics__Container-sc-1ynbvzw-1',
-                    '[class*="Lyrics__Container"]',
-                    '.lyrics',
-                    'div[class*="lyrics"]'
-                ]
-                
-                for selector in selectors:
-                    elements = soup.select(selector)
-                    if elements:
-                        print(f"Found elements with selector: {selector}")
-                        lyrics = '\n'.join(
-                            element.get_text(separator='\n', strip=True) 
-                            for element in elements
-                        )
-                        if lyrics and len(lyrics.split()) > 30:
-                            break
-                        
-        elif "azlyrics.com" in url:
-            print("Processing AZLyrics URL...")
-            # Use regex approach like JavaScript version
-            lyrics_match = re.search(
-                r'<!-- Usage of azlyrics\.com content.*?-->(.*?)<!-- MxM banner -->',
-                html,
-                re.DOTALL
-            )
-            if lyrics_match:
-                lyrics_html = lyrics_match.group(1)
-                lyrics = re.sub(r'<[^>]*>', '', lyrics_html).strip()
-                print(f"AZLyrics extracted length: {len(lyrics)}")
-        
-        else:
-            print("Processing generic lyrics site...")
-            # Generic extraction - look for large text blocks like JavaScript
-            text_blocks = re.findall(r'<div[^>]*>(.*?)</div>', html, re.DOTALL | re.IGNORECASE)
-            if text_blocks:
-                candidates = []
-                for block in text_blocks:
-                    clean_text = re.sub(r'<[^>]*>', '', block).strip()
-                    if len(clean_text) > 200 and '\n' in clean_text:
-                        candidates.append(clean_text)
-                
-                if candidates:
-                    # Sort by length and take the longest
-                    candidates.sort(key=len, reverse=True)
-                    lyrics = candidates[0]
-                    print(f"Generic extraction length: {len(lyrics)}")
-        
-        # Clean up the lyrics
-        if lyrics:
-            # Remove extra whitespace and empty lines
-            lines = [line.strip() for line in lyrics.split('\n') if line.strip()]
-            lyrics = '\n'.join(lines)
-            
-            # Remove common unwanted patterns
-            unwanted_patterns = [
-                r'advertisement.*',
-                r'sponsor.*',
-                r'click here.*',
-                r'www\..*',
-                r'\.com.*',
-                r'copyright.*',
-                r'all rights reserved.*',
-                r'embed.*',
-                r'share.*'
-            ]
-            
-            for pattern in unwanted_patterns:
-                lyrics = re.sub(pattern, '', lyrics, flags=re.IGNORECASE)
-            
-            # Final cleanup
-            lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)  # Remove excessive newlines
-            lyrics = lyrics.strip()
-            
-            print(f"Final cleaned lyrics length: {len(lyrics)} characters, {len(lyrics.split())} words")
-        
-        return lyrics if lyrics and len(lyrics.split()) > 30 else None
-        
-    except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return None
+    Returns:
+        List[float]: Embedding vector (or list of vectors if input is a list).
+    """
+    # Ensure input is a list
+    if isinstance(texts, str):
+        texts = [texts]
 
-def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
-    """Use OpenAI to clean and format the lyrics"""
-    try:
-        print("Formatting lyrics with AI...")
-        
-        format_prompt = f"""Please clean and format the following raw lyrics content:
-
-Raw content:
-{raw_lyrics[:2000]}
-
-Song information:
-- Artist: {artist}
-- Song: {song}
-
-Please perform the following processing:
-1. Remove irrelevant website information, ads, copyright notices
-2. Keep complete lyrics content
-3. Organize paragraph structure with proper line breaks
-4. Remove repetitive markers like [Verse], [Chorus] etc.
-5. Ensure lyrics completeness and readability
-
-Return only the cleaned lyrics content without any additional explanatory text."""
-
-        completion = openai.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": format_prompt}],
-            temperature=0.3,
-            max_tokens=1500
-        )
-        
-        formatted_lyrics = completion.choices[0].message.content.strip()
-        print("Lyrics formatted successfully with AI")
-        return formatted_lyrics
-        
-    except Exception as e:
-        print(f"AI formatting error: {e}")
-        # Return cleaned version without AI if AI fails
-        return clean_lyrics_basic(raw_lyrics)
-
-def clean_lyrics_basic(raw_lyrics: str) -> str:
-    """Basic lyrics cleaning without AI"""
-    try:
-        # Remove common unwanted patterns
-        unwanted_patterns = [
-            r'advertisement.*?\n',
-            r'sponsor.*?\n',
-            r'click here.*?\n',
-            r'www\..*?\n',
-            r'\.com.*?\n',
-            r'copyright.*?\n',
-            r'all rights reserved.*?\n',
-            r'\[.*?\]',  # Remove [Verse], [Chorus] etc.
-            r'Embed$',
-            r'Lyrics$'
-        ]
-        
-        cleaned = raw_lyrics
-        for pattern in unwanted_patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
-        
-        # Clean up whitespace
-        lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
-        cleaned = '\n'.join(lines)
-        
-        # Remove excessive newlines
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-        
-        return cleaned.strip()
-        
-    except Exception:
-        return raw_lyrics
-
-def try_fallback_methods(song: str, artist: str) -> str:
-    """Fallback methods if SerpAPI fails"""
-    try:
-        print(f"Trying fallback methods for: {artist} - {song}")
-        
-        # Try some direct site approaches as last resort
-        fallback_sources = []
-        
-        # Try Genius direct
-        song_clean = clean_text(song).replace(' ', '-')
-        artist_clean = clean_text(artist).replace(' ', '-')
-        genius_url = f"https://genius.com/{artist_clean}-{song_clean}-lyrics"
-        fallback_sources.append(genius_url)
-        
-        # Try variations
-        if ' ' in song:
-            song_alt = song.replace(' ', '')
-            genius_alt = f"https://genius.com/{artist_clean}-{song_alt}-lyrics"
-            fallback_sources.append(genius_alt)
-        
-        for url in fallback_sources:
-            try:
-                print(f"Trying fallback: {url}")
-                lyrics = scrape_lyrics_from_url(url)
-                if lyrics and len(lyrics.split()) > 30:
-                    print(f"Found lyrics from fallback: {url}")
-                    return lyrics
-                time.sleep(1)  # Be respectful
-            except Exception as e:
-                print(f"Fallback failed for {url}: {e}")
-                continue
-        
-        return None
-        
-    except Exception:
-        return None
-
-def fetch_lyrics(song: str, artist: str) -> str:
-    """Main function to fetch lyrics using SerpAPI"""
-    if not SERPAPI_KEY:
-        return "SERPAPI_KEY is missing. Please add it to your .env file."
-    
-    print(f"Searching for lyrics: {song} by {artist}")
-    
-    # Primary method: Use SerpAPI
-    lyrics = fetch_lyrics_with_serpapi(song, artist)
-    
-    if lyrics and len(lyrics.split()) > 20:
-        print("Successfully found lyrics via SerpAPI")
-        return format_lyrics_with_ai(lyrics, artist, song)
-    
-    # Fallback: Try direct scraping as backup
-    print("SerpAPI didn't return lyrics, trying fallback methods...")
-    fallback_lyrics = try_fallback_methods(song, artist)
-    
-    if fallback_lyrics:
-        return format_lyrics_with_ai(fallback_lyrics, artist, song)
-    
-    return "Lyrics not found."
-
-# 用 Jina model 做歌詞 embedding
-def embed_lyrics(text: str, task: str = "text-matching", max_length: int = 2048, truncate_dim: int = 768) -> list:
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
+    # Tokenize and pad
+    encoded_input = tokenizer(
+        texts,
         padding=True,
         truncation=True,
-        max_length=max_length,
+        max_length=512,
+        return_tensors="pt"
     ).to(device)
-    with torch.no_grad():
-        outputs = model.encode(
-            [text] if isinstance(text, str) else text,
-            task=task,
-            max_length=max_length,
-            truncate_dim=truncate_dim,
-        )
-    return outputs[0].cpu().tolist()
 
-# 用 OpenAI GPT-4 分析歌詞情緒與主題
+    # Get model outputs
+    with torch.no_grad():
+        model_output = model(**encoded_input)
+
+    # Average pooling — use attention mask to account for padding
+    attention_mask = encoded_input["attention_mask"]
+    token_embeddings = model_output.last_hidden_state  # (batch_size, seq_len, hidden_size)
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
+    sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+    embeddings = sum_embeddings / sum_mask
+
+    # Convert to list of floats
+    return embeddings[0].cpu().tolist() if len(texts) == 1 else [e.cpu().tolist() for e in embeddings]
+
+# 2. Mood analyze function
+def analyze_mood(text: str, embedding: list) -> str:
+    """
+    Analyze mood and emotional tone of text using GPT-4.
+    
+    Args:
+        text (str): Input text to analyze
+        embedding (list): Embedding vector of the text
+    
+    Returns:
+        str: Mood analysis result
+    """
+    prompt = f"""
+请分析以下文本的情绪和心情状态。结合文字内容和语义向量信息进行分析。
+
+文本内容:
+{text[:800]}
+
+嵌入向量（前10维）:
+{embedding[:10]}...
+
+请用简短中文描述文本的主要情绪、心情状态和情感色彩（3-5句）。
+"""
+    completion = openai.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+    )
+    return completion.choices[0].message.content.strip()
+
+# 3. Lyrics analyze function
 def analyze_lyrics(lyrics: str, embedding: list) -> str:
+    """
+    Analyze lyrics emotion, theme and atmosphere using GPT-4.
+    
+    Args:
+        lyrics (str): Lyrics content
+        embedding (list): Embedding vector of the lyrics
+    
+    Returns:
+        str: Lyrics analysis result
+    """
     prompt = f"""
 下面是歌词内容和它的语义向量嵌入。请结合文字和语义信息，分析其情绪、主题和氛围。
 
@@ -427,9 +136,18 @@ def analyze_lyrics(lyrics: str, embedding: list) -> str:
     )
     return completion.choices[0].message.content.strip()
 
-# 基于分析内容生成短篇故事
+# 4. Story generate function
 def generate_story(analysis: str) -> str:
-    prompt = f"请基于以下歌词分析，创作一段反映相似情感和主题的短篇小说：\n\n{analysis}"
+    """
+    Generate a short story based on analysis content.
+    
+    Args:
+        analysis (str): Analysis content to base the story on
+    
+    Returns:
+        str: Generated story
+    """
+    prompt = f"请基于以下分析内容，创作一段反映相似情感和主题的短篇小说：\n\n{analysis}"
     completion = openai.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
@@ -437,22 +155,59 @@ def generate_story(analysis: str) -> str:
     )
     return completion.choices[0].message.content.strip()
 
-class SongRequest(BaseModel):
-    title: str
-    artist: str
+# Request models
+class MoodAnalysisRequest(BaseModel):
+    text: str
 
+class StoryGenerationRequest(BaseModel):
+    lyrics: str
+
+# API 1: Mood analyzing (embedding function + mood analyze function)
+@app.post("/analyze-mood")
+def mood_analysis_api(req: MoodAnalysisRequest):
+    """
+    API for mood analysis using embedding and mood analysis functions.
+    """
+    try:
+        # Generate embedding
+        embedding = embed_texts(req.text)
+        
+        # Analyze mood
+        mood_analysis = analyze_mood(req.text, embedding)
+        
+        return {
+            "text_snippet": req.text[:200] + "..." if len(req.text) > 200 else req.text,
+            "mood_analysis": mood_analysis,
+            "embedding_dimensions": len(embedding)
+        }
+    except Exception as e:
+        return {"error": f"Error analyzing mood: {str(e)}"}
+
+# API 2: Story generation (embedding function + lyrics analyze function + story generation)
 @app.post("/generate-story")
-def process_song(req: SongRequest):
-    lyrics = fetch_lyrics(req.title, req.artist)
-    if "Lyrics not found" in lyrics:
-        return {"error": "Could not find lyrics for this song. Please check the song title and artist name."}
+def story_generation_api(req: StoryGenerationRequest):
+    """
+    API for story generation using embedding, lyrics analysis, and story generation functions.
+    """
+    try:
+        # Generate embedding
+        embedding = embed_texts(req.lyrics)
+        
+        # Analyze lyrics
+        lyrics_analysis = analyze_lyrics(req.lyrics, embedding)
+        
+        # Generate story
+        story = generate_story(lyrics_analysis)
+        
+        return {
+            "lyrics_snippet": req.lyrics[:200] + "..." if len(req.lyrics) > 200 else req.lyrics,
+            "lyrics_analysis": lyrics_analysis,
+            "story": story,
+            "embedding_dimensions": len(embedding)
+        }
+    except Exception as e:
+        return {"error": f"Error generating story: {str(e)}"}
 
-    embedding = embed_lyrics(lyrics)
-    analysis = analyze_lyrics(lyrics, embedding)
-    story = generate_story(analysis)
-
-    return {
-        "lyrics_snippet": lyrics[:500] + "..." if len(lyrics) > 500 else lyrics,
-        "analysis": analysis,
-        "story": story
-    }
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

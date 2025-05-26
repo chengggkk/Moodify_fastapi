@@ -17,6 +17,14 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 HF_API_KEY = os.getenv("HF_API_KEY")
 
+# Validate required API keys
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY is missing from environment variables")
+if not SERPAPI_KEY:
+    raise ValueError("SERPAPI_KEY is missing from environment variables")
+if not HF_API_KEY:
+    raise ValueError("HF_API_KEY is missing from environment variables")
+
 openai.api_key = OPENAI_API_KEY
 
 app = FastAPI()
@@ -40,200 +48,321 @@ def clean_text(text):
     """Clean and normalize text for better matching"""
     return re.sub(r'[^\w\s]', '', text.lower().strip())
 
-def fetch_lyrics_genius(song: str, artist: str) -> str:
-    """Fetch lyrics from Genius.com"""
+def fetch_lyrics_with_serpapi(song: str, artist: str) -> str:
+    """Fetch lyrics using SerpAPI Google Search"""
     try:
-        # Format the URL for Genius
-        song_clean = clean_text(song).replace(' ', '-')
-        artist_clean = clean_text(artist).replace(' ', '-')
-        url = f"https://genius.com/{artist_clean}-{song_clean}-lyrics"
+        print(f"Fetching lyrics via SerpAPI: {artist} - {song}")
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Genius uses different selectors for lyrics
-            lyrics_containers = [
-                '[data-lyrics-container="true"]',
-                '.Lyrics__Container-sc-1ynbvzw-1',
-                '.lyrics',
-                '[class*="Lyrics"]'
-            ]
-            
-            for selector in lyrics_containers:
-                elements = soup.select(selector)
-                if elements:
-                    lyrics_text = ""
-                    for element in elements:
-                        lyrics_text += element.get_text(separator='\n', strip=True) + '\n'
-                    
-                    if lyrics_text.strip() and len(lyrics_text.split()) > 20:
-                        return lyrics_text.strip()
-        
-        return None
-    except Exception as e:
-        print(f"Error fetching from Genius: {e}")
-        return None
-
-def fetch_lyrics_azlyrics(song: str, artist: str) -> str:
-    """Fetch lyrics from AZLyrics"""
-    try:
-        # Format for AZLyrics URL structure
-        artist_clean = re.sub(r'[^a-z0-9]', '', artist.lower())
-        song_clean = re.sub(r'[^a-z0-9]', '', song.lower())
-        url = f"https://www.azlyrics.com/lyrics/{artist_clean}/{song_clean}.html"
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # AZLyrics stores lyrics in divs without class
-            lyrics_div = soup.find('div', class_=False, id=False)
-            if lyrics_div and lyrics_div.get_text(strip=True):
-                lyrics_text = lyrics_div.get_text(separator='\n', strip=True)
-                if len(lyrics_text.split()) > 20:
-                    return lyrics_text
-        
-        return None
-    except Exception as e:
-        print(f"Error fetching from AZLyrics: {e}")
-        return None
-
-def search_lyrics_with_serpapi(song: str, artist: str) -> str:
-    """Use SerpAPI to find lyrics if available"""
-    if not SERPAPI_KEY:
-        return None
-        
-    try:
-        query = f"{song} {artist} lyrics site:genius.com OR site:azlyrics.com"
-        url = "https://serpapi.com/search"
+        # Search for lyrics using SerpAPI
+        search_query = f"{artist} {song} lyrics"
+        serp_url = "https://serpapi.com/search.json"
         
         params = {
             "engine": "google",
-            "q": query,
-            "api_key": SERPAPI_KEY,
-            "num": 5
+            "q": search_query,
+            "api_key": SERPAPI_KEY
         }
         
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
+        response = requests.get(serp_url, params=params, timeout=15)
+        if response.status_code != 200:
+            print(f"SerpAPI request failed: {response.status_code}")
+            return None
             
-            for result in data.get("organic_results", []):
-                link = result.get("link", "")
-                if "genius.com" in link or "azlyrics.com" in link:
-                    lyrics = scrape_lyrics_from_url(link)
-                    if lyrics and len(lyrics.split()) > 20:
-                        return lyrics
+        data = response.json()
+        print("SerpAPI search completed")
         
-        return None
+        lyrics_content = None
+        
+        # Check knowledge graph for direct lyrics
+        if data.get("knowledge_graph") and data["knowledge_graph"].get("lyrics"):
+            lyrics_content = data["knowledge_graph"]["lyrics"]
+            print("Found lyrics in knowledge graph")
+        
+        # Check organic results for lyrics sites
+        if not lyrics_content and data.get("organic_results"):
+            lyrics_urls = [
+                result for result in data["organic_results"]
+                if result.get("link") and any(
+                    site in result["link"] for site in [
+                        "genius.com", "azlyrics.com", "lyrics.com", "metrolyrics.com"
+                    ]
+                )
+            ][:3]  # Try first 3 results
+            
+            for result in lyrics_urls:
+                try:
+                    print(f"Trying to fetch from: {result['link']}")
+                    lyrics_content = scrape_lyrics_from_url(result["link"])
+                    if lyrics_content and len(lyrics_content.split()) > 30:
+                        print("Successfully fetched lyrics from URL")
+                        break
+                except Exception as e:
+                    print(f"Failed to fetch from {result['link']}: {e}")
+                    continue
+        
+        # Check answer box or featured snippet
+        if not lyrics_content and data.get("answer_box"):
+            if data["answer_box"].get("snippet"):
+                lyrics_content = data["answer_box"]["snippet"]
+                print("Found lyrics in answer box")
+        
+        return lyrics_content
+        
     except Exception as e:
-        print(f"Error with SerpAPI: {e}")
+        print(f"SerpAPI lyrics fetch error: {e}")
         return None
 
 def scrape_lyrics_from_url(url: str) -> str:
-    """Generic lyrics scraper for various sites"""
+    """Enhanced lyrics scraper for various sites"""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             return None
             
-        soup = BeautifulSoup(response.text, 'html.parser')
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
         
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "header", "footer"]):
-            script.decompose()
+        # Remove unwanted elements
+        for element in soup(["script", "style", "nav", "header", "footer", "aside"]):
+            element.decompose()
         
-        # Try different selectors based on common lyrics sites
-        selectors = [
-            '[data-lyrics-container="true"]',  # Genius
-            '.Lyrics__Container-sc-1ynbvzw-1',  # Genius new
-            '.lyrics',  # Generic
-            '.lyricsh',  # Some sites
-            '#lyrics',  # ID-based
-            '.song-lyrics',  # Generic
-            'div[class=""]',  # AZLyrics style
-        ]
+        lyrics = ""
         
-        for selector in selectors:
-            elements = soup.select(selector)
-            for element in elements:
-                text = element.get_text(separator='\n', strip=True)
-                # Check if this looks like lyrics (reasonable length, multiple lines)
-                if text and len(text.split()) > 30 and '\n' in text:
-                    # Clean up the text
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
-                    lyrics = '\n'.join(lines)
-                    return lyrics
+        if "genius.com" in url:
+            # Extract from Genius using multiple selectors
+            selectors = [
+                '[data-lyrics-container="true"]',
+                '.Lyrics__Container-sc-1ynbvzw-1',
+                '[class*="Lyrics__Container"]',
+                '.lyrics'
+            ]
+            
+            for selector in selectors:
+                elements = soup.select(selector)
+                if elements:
+                    lyrics = '\n'.join(
+                        element.get_text(separator='\n', strip=True) 
+                        for element in elements
+                    )
+                    break
+                    
+        elif "azlyrics.com" in url:
+            # Extract from AZLyrics pattern
+            # Look for the comment pattern that indicates lyrics start
+            lyrics_match = re.search(
+                r'<!-- Usage of azlyrics\.com content.*?-->(.*?)<!-- MxM banner -->',
+                html,
+                re.DOTALL
+            )
+            if lyrics_match:
+                lyrics_html = lyrics_match.group(1)
+                lyrics_soup = BeautifulSoup(lyrics_html, 'html.parser')
+                lyrics = lyrics_soup.get_text(separator='\n', strip=True)
+            else:
+                # Fallback: look for divs without class/id (AZLyrics style)
+                divs = soup.find_all('div', {'class': False, 'id': False})
+                for div in divs:
+                    text = div.get_text(strip=True)
+                    if len(text) > 200 and '\n' in text:
+                        lyrics = text
+                        break
+                        
+        else:
+            # Generic extraction for other sites
+            # Try common lyrics selectors
+            selectors = [
+                '.lyrics', '.lyric-body', '.song-lyrics', 
+                '#lyrics', '.lyricsh', '[class*="lyric"]'
+            ]
+            
+            for selector in selectors:
+                elements = soup.select(selector)
+                if elements:
+                    lyrics = '\n'.join(
+                        element.get_text(separator='\n', strip=True) 
+                        for element in elements
+                    )
+                    break
+            
+            # If no specific selectors work, try to find large text blocks
+            if not lyrics:
+                all_divs = soup.find_all('div')
+                candidates = []
+                
+                for div in all_divs:
+                    text = div.get_text(separator='\n', strip=True)
+                    # Filter for text that looks like lyrics
+                    if (len(text) > 200 and 
+                        text.count('\n') > 5 and 
+                        len(text.split()) > 50):
+                        candidates.append(text)
+                
+                if candidates:
+                    # Return the longest candidate
+                    lyrics = max(candidates, key=len)
         
-        return None
+        # Clean up the lyrics
+        if lyrics:
+            lines = [line.strip() for line in lyrics.split('\n') if line.strip()]
+            lyrics = '\n'.join(lines)
+            
+            # Remove common unwanted patterns
+            unwanted_patterns = [
+                r'advertisement',
+                r'sponsor',
+                r'click here',
+                r'www\.',
+                r'\.com',
+                r'copyright',
+                r'all rights reserved'
+            ]
+            
+            for pattern in unwanted_patterns:
+                lyrics = re.sub(pattern, '', lyrics, flags=re.IGNORECASE)
+            
+            # Final cleanup
+            lyrics = re.sub(r'\n{3,}', '\n\n', lyrics)  # Remove excessive newlines
+            lyrics = lyrics.strip()
+        
+        return lyrics if lyrics and len(lyrics.split()) > 30 else None
+        
     except Exception as e:
         print(f"Error scraping {url}: {e}")
         return None
 
-def fetch_lyrics(song: str, artist: str) -> str:
-    """Main function to fetch lyrics from multiple sources"""
-    print(f"Searching for lyrics: {song} by {artist}")
-    
-    # Try different sources in order of reliability
-    sources = [
-        ("Genius", lambda: fetch_lyrics_genius(song, artist)),
-        ("AZLyrics", lambda: fetch_lyrics_azlyrics(song, artist)),
-        ("SerpAPI", lambda: search_lyrics_with_serpapi(song, artist)),
-    ]
-    
-    for source_name, fetch_func in sources:
-        try:
-            print(f"Trying {source_name}...")
-            lyrics = fetch_func()
-            if lyrics and len(lyrics.split()) > 20:
-                print(f"Found lyrics from {source_name}")
-                return lyrics
-            time.sleep(1)  # Be respectful with requests
-        except Exception as e:
-            print(f"Error with {source_name}: {e}")
-            continue
-    
-    # If all else fails, try a broader search approach
-    print("Trying alternative search methods...")
-    alternative_lyrics = try_alternative_search(song, artist)
-    if alternative_lyrics:
-        return alternative_lyrics
-    
-    return "Lyrics not found."
-
-def try_alternative_search(song: str, artist: str) -> str:
-    """Try alternative methods to find lyrics"""
+def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
+    """Use OpenAI to clean and format the lyrics"""
     try:
-        # Try different variations of the song/artist name
-        variations = [
-            (song, artist),
-            (song.replace("'", ""), artist),
-            (song.replace("&", "and"), artist),
-            (re.sub(r'\([^)]*\)', '', song).strip(), artist),  # Remove parentheses
+        print("Formatting lyrics with AI...")
+        
+        format_prompt = f"""Please clean and format the following raw lyrics content:
+
+Raw content:
+{raw_lyrics[:2000]}
+
+Song information:
+- Artist: {artist}
+- Song: {song}
+
+Please perform the following processing:
+1. Remove irrelevant website information, ads, copyright notices
+2. Keep complete lyrics content
+3. Organize paragraph structure with proper line breaks
+4. Remove repetitive markers like [Verse], [Chorus] etc.
+5. Ensure lyrics completeness and readability
+
+Return only the cleaned lyrics content without any additional explanatory text."""
+
+        completion = openai.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": format_prompt}],
+            temperature=0.3,
+            max_tokens=1500
+        )
+        
+        formatted_lyrics = completion.choices[0].message.content.strip()
+        print("Lyrics formatted successfully with AI")
+        return formatted_lyrics
+        
+    except Exception as e:
+        print(f"AI formatting error: {e}")
+        # Return cleaned version without AI if AI fails
+        return clean_lyrics_basic(raw_lyrics)
+
+def clean_lyrics_basic(raw_lyrics: str) -> str:
+    """Basic lyrics cleaning without AI"""
+    try:
+        # Remove common unwanted patterns
+        unwanted_patterns = [
+            r'advertisement.*?\n',
+            r'sponsor.*?\n',
+            r'click here.*?\n',
+            r'www\..*?\n',
+            r'\.com.*?\n',
+            r'copyright.*?\n',
+            r'all rights reserved.*?\n',
+            r'\[.*?\]',  # Remove [Verse], [Chorus] etc.
+            r'Embed$',
+            r'Lyrics$'
         ]
         
-        for s, a in variations:
-            if s != song or a != artist:  # Only try if it's different
-                lyrics = fetch_lyrics_genius(s, a)
-                if lyrics and len(lyrics.split()) > 20:
+        cleaned = raw_lyrics
+        for pattern in unwanted_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE | re.MULTILINE)
+        
+        # Clean up whitespace
+        lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
+        cleaned = '\n'.join(lines)
+        
+        # Remove excessive newlines
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+        
+        return cleaned.strip()
+        
+    except Exception:
+        return raw_lyrics
+
+def try_fallback_methods(song: str, artist: str) -> str:
+    """Fallback methods if SerpAPI fails"""
+    try:
+        # Try some direct site approaches as last resort
+        fallback_sources = []
+        
+        # Try Genius direct
+        song_clean = clean_text(song).replace(' ', '-')
+        artist_clean = clean_text(artist).replace(' ', '-')
+        genius_url = f"https://genius.com/{artist_clean}-{song_clean}-lyrics"
+        fallback_sources.append(genius_url)
+        
+        # Try variations
+        if ' ' in song:
+            song_alt = song.replace(' ', '')
+            genius_alt = f"https://genius.com/{artist_clean}-{song_alt}-lyrics"
+            fallback_sources.append(genius_alt)
+        
+        for url in fallback_sources:
+            try:
+                print(f"Trying fallback: {url}")
+                lyrics = scrape_lyrics_from_url(url)
+                if lyrics and len(lyrics.split()) > 30:
+                    print(f"Found lyrics from fallback: {url}")
                     return lyrics
+                time.sleep(1)  # Be respectful
+            except Exception as e:
+                print(f"Fallback failed for {url}: {e}")
+                continue
         
         return None
+        
     except Exception:
         return None
+
+def fetch_lyrics(song: str, artist: str) -> str:
+    """Main function to fetch lyrics using SerpAPI"""
+    if not SERPAPI_KEY:
+        return "SERPAPI_KEY is missing. Please add it to your .env file."
+    
+    print(f"Searching for lyrics: {song} by {artist}")
+    
+    # Primary method: Use SerpAPI
+    lyrics = fetch_lyrics_with_serpapi(song, artist)
+    
+    if lyrics and len(lyrics.split()) > 20:
+        print("Successfully found lyrics via SerpAPI")
+        return format_lyrics_with_ai(lyrics, artist, song)
+    
+    # Fallback: Try direct scraping as backup
+    print("SerpAPI didn't return lyrics, trying fallback methods...")
+    fallback_lyrics = try_fallback_methods(song, artist)
+    
+    if fallback_lyrics:
+        return format_lyrics_with_ai(fallback_lyrics, artist, song)
+    
+    return "Lyrics not found."
 
 # 用 Jina model 做歌詞 embedding
 def embed_lyrics(text: str, task: str = "text-matching", max_length: int = 2048, truncate_dim: int = 768) -> list:

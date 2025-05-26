@@ -52,6 +52,23 @@ model = AutoModel.from_pretrained(
     trust_remote_code=True,
 ).to(device)
 
+def preprocess_long_text(text: str, max_length: int = 1000) -> str:
+    """
+    Preprocess long text by taking the most relevant parts.
+    For lyrics, take the beginning and end to capture the full emotional arc.
+    """
+    if len(text) <= max_length:
+        return text
+    
+    # For very long text, take first half and last quarter
+    first_part_len = max_length // 2
+    last_part_len = max_length // 4
+    
+    first_part = text[:first_part_len]
+    last_part = text[-last_part_len:]
+    
+    return first_part + "\n...\n" + last_part
+
 # 1. Embedding function
 def embed_texts(texts: Union[str, List[str]]) -> List[float]:
     """
@@ -103,14 +120,18 @@ def analyze_mood(text: str, embedding: list) -> str:
     Returns:
         str: Mood analysis result
     """
+    # Truncate text to avoid token limits
+    truncated_text = text[:1000] if len(text) > 1000 else text
+    truncated_embedding = embedding[:10] if len(embedding) > 10 else embedding
+    
     prompt = f"""
 请分析以下文本的情绪和心情状态。结合文字内容和语义向量信息进行分析。
 
 文本内容:
-{text[:800]}
+{truncated_text}
 
 嵌入向量（前10维）:
-{embedding[:10]}...
+{truncated_embedding}...
 
 请用简短中文描述文本的主要情绪、心情状态和情感色彩（3-5句）。
 """
@@ -118,6 +139,7 @@ def analyze_mood(text: str, embedding: list) -> str:
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
+        max_tokens=500  # Limit response length
     )
     return completion.choices[0].message.content.strip()
 
@@ -133,14 +155,18 @@ def analyze_lyrics(lyrics: str, embedding: list) -> str:
     Returns:
         str: Lyrics analysis result
     """
+    # Truncate lyrics to avoid token limits
+    truncated_lyrics = lyrics[:1000] if len(lyrics) > 1000 else lyrics
+    truncated_embedding = embedding[:10] if len(embedding) > 10 else embedding
+    
     prompt = f"""
 下面是歌词内容和它的语义向量嵌入。请结合文字和语义信息，分析其情绪、主题和氛围。
 
-歌词（前段）:
-{lyrics[:800]}
+歌词内容:
+{truncated_lyrics}
 
 嵌入向量（前10维）:
-{embedding[:10]}...
+{truncated_embedding}...
 
 请用简短中文描述歌词的主要情感和主题（3-5句）。
 """
@@ -148,6 +174,7 @@ def analyze_lyrics(lyrics: str, embedding: list) -> str:
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.7,
+        max_tokens=500  # Limit response length
     )
     return completion.choices[0].message.content.strip()
 
@@ -162,11 +189,15 @@ def generate_story(analysis: str) -> str:
     Returns:
         str: Generated story
     """
-    prompt = f"请基于以下分析内容，创作一段反映相似情感和主题的短篇小说：\n\n{analysis}"
+    # Truncate analysis if too long
+    truncated_analysis = analysis[:800] if len(analysis) > 800 else analysis
+    
+    prompt = f"请基于以下分析内容，创作一段反映相似情感和主题的短篇小说：\n\n{truncated_analysis}"
     completion = openai.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.85,
+        max_tokens=1000  # Limit story length
     )
     return completion.choices[0].message.content.strip()
 
@@ -216,14 +247,18 @@ def story_generation_api(req: StoryGenerationRequest):
     try:
         print(f"Received lyrics length: {len(req.lyrics)}")
         
+        # Preprocess lyrics if too long
+        processed_lyrics = preprocess_long_text(req.lyrics, 2000)
+        print(f"Processed lyrics length: {len(processed_lyrics)}")
+        
         # Generate embedding
         print("Generating embedding...")
-        embedding = embed_texts(req.lyrics)
+        embedding = embed_texts(processed_lyrics)
         print(f"Embedding generated with {len(embedding)} dimensions")
         
         # Analyze lyrics
         print("Analyzing lyrics...")
-        lyrics_analysis = analyze_lyrics(req.lyrics, embedding)
+        lyrics_analysis = analyze_lyrics(processed_lyrics, embedding)
         print(f"Lyrics analysis completed: {lyrics_analysis[:100]}...")
         
         # Generate story
@@ -233,6 +268,8 @@ def story_generation_api(req: StoryGenerationRequest):
         
         return {
             "lyrics_snippet": req.lyrics[:200] + "..." if len(req.lyrics) > 200 else req.lyrics,
+            "processed_lyrics_length": len(processed_lyrics),
+            "original_lyrics_length": len(req.lyrics),
             "lyrics_analysis": lyrics_analysis,
             "story": story,
             "embedding_dimensions": len(embedding)

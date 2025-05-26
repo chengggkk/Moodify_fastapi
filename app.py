@@ -842,7 +842,7 @@ Generate your masterpiece story in English, demonstrating peak creative storytel
             "original_lyrics_length": len(req.lyrics),
             "custom_story": req.custom_story,
             "creative_lyrics_analysis": lyrics_analysis,
-            "masterpiece_story": story,
+            "story": story,
             "embedding_dimensions": len(embedding),
             "creative_enhancement": "Maximum Creativity Mode with Advanced English Prompting"
         }

@@ -16,6 +16,7 @@ import re
 import io
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image, ImageEnhance, ImageFilter
+from donut import donut_router
 
 load_dotenv()
 
@@ -510,7 +511,7 @@ tokenizer = AutoTokenizer.from_pretrained(
     trust_remote_code=True,
 )
 
-model = AutoModel.from_pretrained(
+embed_model = AutoModel.from_pretrained(
     "jinaai/jina-embeddings-v3",
     token=HF_API_KEY,
     trust_remote_code=True,
@@ -1308,6 +1309,8 @@ Generate your masterpiece story in English, demonstrating peak creative storytel
         import traceback
         traceback.print_exc()
         return {"error": f"Error generating creative story: {str(e)}", "type": type(e).__name__}
+
+app.include_router(donut_router)
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,5 +1,6 @@
 import os
 import torch
+import logging
 from typing import Union, List, Dict, Any
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel

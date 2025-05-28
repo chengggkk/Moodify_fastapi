@@ -1,13 +1,20 @@
 import os
 import torch
 from typing import Union, List, Dict, Any
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, logging as transformers_logging, DonutProcessor, VisionEncoderDecoderModel
 import openai
 import json
 import random
+import numpy as np
+import cv2
+import warnings
+import re
+import io
+from fastapi.concurrency import run_in_threadpool
+from PIL import Image, ImageEnhance, ImageFilter
 
 load_dotenv()
 
@@ -22,12 +29,466 @@ if not HF_API_KEY:
 
 openai.api_key = OPENAI_API_KEY
 
+# Set logging level to ERROR to suppress warnings and info messages
+logging.getLogger().setLevel(logging.ERROR)
+transformers_logging.set_verbosity_error()
+warnings.filterwarnings("ignore")
+
+# Load environment variables from a .env file
+load_dotenv()
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# Load a multilingual model that supports text recognition
+MODEL_NAME = "naver-clova-ix/donut-base-finetuned-cord-v2"
+
+try:
+    # Initialize the processor and model
+    processor = DonutProcessor.from_pretrained(
+        MODEL_NAME,
+        token=os.getenv("HUGGINGFACE_TOKEN")
+    )
+    model = VisionEncoderDecoderModel.from_pretrained(
+        MODEL_NAME,
+        token=os.getenv("HUGGINGFACE_TOKEN")
+    )
+    
+    # Move to GPU if available
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    
+    print(f"Donut model loaded successfully on {device}!")
+except Exception as e:
+    print(f"Error loading Donut model: {e}")
+
+def preprocess_image(pil_img):
+    """
+    Apply optimized preprocessing techniques for better text recognition
+    """
+    try:
+        # Convert PIL to OpenCV format
+        img = np.array(pil_img)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        # Resize for better processing
+        target_width = 1024
+        h, w = img.shape[:2]
+        scale = target_width / w
+        new_height = int(h * scale)
+        img = cv2.resize(img, (target_width, new_height), interpolation=cv2.INTER_AREA)
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # Apply adaptive thresholding
+        binary = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 2
+        )
+        
+        # Convert back to PIL format
+        enhanced_img = Image.fromarray(binary)
+        
+        # Sharpen the image
+        enhanced_img = enhanced_img.filter(ImageFilter.SHARPEN)
+        
+        return enhanced_img
+    except Exception as e:
+        print(f"Error in image preprocessing: {str(e)}")
+        return pil_img
+
+def create_processing_variants(pil_img):
+    """
+    Create image variants for better OCR processing
+    """
+    try:
+        variants = []
+        
+        # Original image
+        variants.append(pil_img)
+        
+        # Standard preprocessing
+        try:
+            variants.append(preprocess_image(pil_img))
+        except Exception as e:
+            print(f"Error creating preprocessed variant: {str(e)}")
+        
+        # High contrast grayscale
+        try:
+            gray_img = pil_img.convert('L')
+            contrast_enhancer = ImageEnhance.Contrast(gray_img)
+            high_contrast_img = contrast_enhancer.enhance(2.5)
+            variants.append(high_contrast_img)
+        except Exception as e:
+            print(f"Error creating high contrast variant: {str(e)}")
+        
+        # Enhanced brightness variant
+        try:
+            brightness_enhancer = ImageEnhance.Brightness(pil_img)
+            bright_img = brightness_enhancer.enhance(1.3)
+            variants.append(bright_img)
+        except Exception as e:
+            print(f"Error creating brightness variant: {str(e)}")
+        
+        return variants
+    except Exception as e:
+        print(f"Error in creating image variants: {str(e)}")
+        return [pil_img]
+
+def extract_playlist_info(text):
+    """
+    Extract Spotify playlist information from OCR text
+    """
+    results = {
+        "playlist_name": None,
+        "artist_names": [],
+        "song_titles": [],
+        "duration": None,
+        "song_count": None
+    }
+    
+    try:
+        # Clean the text
+        text = text.strip()
+        
+        # Look for playlist name patterns
+        playlist_patterns = [
+            r'(?:Playlist|播放清單|列表)[:：]?\s*([^\n\r]+)',
+            r'^([A-Za-z0-9\s\-_\u4e00-\u9fff]+)(?:\s*-\s*Spotify)?$',
+            r'▶\s*([^\n\r]+)',
+            r'🎵\s*([^\n\r]+)'
+        ]
+        
+        for pattern in playlist_patterns:
+            match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
+            if match and not results["playlist_name"]:
+                candidate = match.group(1).strip()
+                if len(candidate) > 2 and len(candidate) < 100:  # Reasonable length
+                    results["playlist_name"] = candidate
+                    break
+        
+        # Look for song titles and artists (common patterns)
+        song_patterns = [
+            r'(\d+)\.\s*([^\n\r-]+?)\s*-\s*([^\n\r]+)',  # 1. Song Title - Artist
+            r'([^\n\r-]+?)\s*-\s*([^\n\r]+?)(?:\s*\d+:\d+)?',  # Song Title - Artist [Duration]
+            r'♪\s*([^\n\r-]+?)\s*-\s*([^\n\r]+)',  # ♪ Song Title - Artist
+            r'🎵\s*([^\n\r-]+?)\s*-\s*([^\n\r]+)'  # 🎵 Song Title - Artist
+        ]
+        
+        for pattern in song_patterns:
+            matches = re.findall(pattern, text, re.MULTILINE)
+            for match in matches:
+                if len(match) == 3:  # Pattern with number
+                    song_title = match[1].strip()
+                    artist = match[2].strip()
+                elif len(match) == 2:  # Pattern without number
+                    song_title = match[0].strip()
+                    artist = match[1].strip()
+                else:
+                    continue
+                
+                # Filter out obvious non-song entries
+                if (len(song_title) > 1 and len(artist) > 1 and 
+                    len(song_title) < 100 and len(artist) < 100 and
+                    song_title not in results["song_titles"]):
+                    results["song_titles"].append(song_title)
+                    if artist not in results["artist_names"]:
+                        results["artist_names"].append(artist)
+        
+        # Look for duration patterns
+        duration_pattern = r'(?:总时长|總時長|Duration|时长)[:：]?\s*(\d+:\d+(?::\d+)?)'
+        duration_match = re.search(duration_pattern, text, re.IGNORECASE)
+        if duration_match:
+            results["duration"] = duration_match.group(1)
+        
+        # Look for song count
+        count_patterns = [
+            r'(\d+)\s*首歌曲',
+            r'(\d+)\s*songs?',
+            r'(\d+)\s*tracks?',
+            r'共\s*(\d+)\s*首'
+        ]
+        
+        for pattern in count_patterns:
+            count_match = re.search(pattern, text, re.IGNORECASE)
+            if count_match:
+                results["song_count"] = int(count_match.group(1))
+                break
+        
+        # If no explicit count, use the number of detected songs
+        if not results["song_count"] and results["song_titles"]:
+            results["song_count"] = len(results["song_titles"])
+            
+    except Exception as e:
+        print(f"Error extracting playlist info: {str(e)}")
+    
+    return results
+
+async def verify_playlist_with_openai(extracted_info, raw_text=""):
+    """
+    Use OpenAI to verify and enhance playlist information extraction
+    """
+    try:
+        completion = await run_in_threadpool(
+            lambda: openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": """
+                    You are a Spotify playlist analyzer. Your task is to extract structured information from OCR text of Spotify playlist screenshots or images.
+                    
+                    Extract the following information:
+                    1. Playlist name/title
+                    2. List of song titles
+                    3. List of artist names
+                    4. Total duration (if visible)
+                    5. Number of songs/tracks
+                    
+                    Look for common Spotify UI elements like:
+                    - Play buttons (▶)
+                    - Song numbering (1., 2., 3., etc.)
+                    - Artist - Song format or Song - Artist format
+                    - Duration timestamps (3:45, 2:30, etc.)
+                    - "Add to playlist" buttons
+                    - Profile/user information
+                    
+                    Return a JSON object with this structure:
+                    {
+                        "playlist_name": "string or null",
+                        "song_titles": ["song1", "song2", ...],
+                        "artist_names": ["artist1", "artist2", ...],
+                        "duration": "string or null",
+                        "song_count": number or null,
+                        "confidence": "high/medium/low"
+                    }
+                    
+                    If the text doesn't appear to be from a Spotify playlist, set confidence to "low".
+                    Be generous in extracting song titles and artists even if formatting is imperfect.
+                    """},
+                    {"role": "user", "content": f"Analyze this OCR text from what appears to be a Spotify playlist image:\n\n{raw_text}\n\nExtract playlist information and return structured JSON."}
+                ]
+            )
+        )
+
+        ai_response = completion.choices[0].message.content.strip()
+        print(f"OpenAI playlist analysis response: {ai_response}")
+        
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+        if json_match:
+            try:
+                verified_data = json.loads(json_match.group())
+                
+                # Merge with original extraction, preferring AI results
+                final_result = {
+                    "playlist_name": verified_data.get("playlist_name") or extracted_info.get("playlist_name"),
+                    "song_titles": verified_data.get("song_titles", []) or extracted_info.get("song_titles", []),
+                    "artist_names": verified_data.get("artist_names", []) or extracted_info.get("artist_names", []),
+                    "duration": verified_data.get("duration") or extracted_info.get("duration"),
+                    "song_count": verified_data.get("song_count") or extracted_info.get("song_count"),
+                    "confidence": verified_data.get("confidence", "medium")
+                }
+                
+                # Determine if this looks like valid playlist data
+                is_valid = (
+                    final_result["playlist_name"] or 
+                    len(final_result["song_titles"]) > 0 or 
+                    len(final_result["artist_names"]) > 0
+                )
+                
+                return is_valid, final_result
+                
+            except json.JSONDecodeError as e:
+                print(f"Failed to parse JSON from OpenAI response: {e}")
+        
+        return False, extracted_info
+        
+    except Exception as e:
+        print(f"Error in OpenAI playlist verification: {str(e)}")
+        return False, extracted_info
+
+
 app = FastAPI()
 
 # Health check endpoint
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "message": "API is running"}
+@app.post("/playlist-recognize")
+async def recognize_playlist(image: UploadFile = File(...)):
+    """
+    Recognize Spotify playlist information from an uploaded image
+    """
+    try:
+        # Read the uploaded image
+        img_bytes = await image.read()
+        original_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        
+        # Create processed variants of the image
+        image_variants = create_processing_variants(original_img)
+        
+        best_result = None
+        best_confidence = 0
+        
+        # Try with each image variant using Donut model
+        for i, img_variant in enumerate(image_variants):
+            # Check if model was loaded successfully
+            if 'processor' not in globals() or 'model' not in globals():
+                raise HTTPException(status_code=500, detail="Donut model not loaded correctly")
+            
+            try:
+                # Define a task-specific prompt for document understanding
+                task_prompt = "<s_cord-v2>"
+                
+                # Process the image
+                pixel_values = processor(img_variant, return_tensors="pt").pixel_values.to(device)
+                decoder_input_ids = processor.tokenizer(task_prompt, add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+                
+                # Generate text from image
+                generated_ids = model.generate(
+                    pixel_values,
+                    decoder_input_ids=decoder_input_ids,
+                    max_length=512,  # Increased for more content
+                    early_stopping=True,
+                    num_beams=4,
+                    do_sample=False,
+                    num_return_sequences=1,
+                    length_penalty=1.0,
+                    use_cache=True
+                )
+                
+                # Decode the generated text
+                donut_output = processor.batch_decode(
+                    generated_ids, 
+                    skip_special_tokens=True
+                )[0]
+                
+                print(f"Donut OCR output for variant {i}: {donut_output}")
+                
+                # Extract playlist information
+                playlist_info = extract_playlist_info(donut_output)
+                
+                # Verify and enhance with OpenAI
+                is_valid, verified_data = await verify_playlist_with_openai(playlist_info, donut_output)
+                
+                if is_valid:
+                    confidence_score = 0
+                    if verified_data.get("confidence") == "high":
+                        confidence_score = 3
+                    elif verified_data.get("confidence") == "medium":
+                        confidence_score = 2
+                    else:
+                        confidence_score = 1
+                    
+                    # Add points for actual content found
+                    if verified_data.get("playlist_name"):
+                        confidence_score += 2
+                    if verified_data.get("song_titles"):
+                        confidence_score += len(verified_data["song_titles"]) * 0.5
+                    if verified_data.get("artist_names"):
+                        confidence_score += len(verified_data["artist_names"]) * 0.3
+                    
+                    if confidence_score > best_confidence:
+                        best_confidence = confidence_score
+                        best_result = {
+                            "playlist_data": verified_data,
+                            "raw_ocr_text": donut_output,
+                            "source": f"donut_variant_{i}_verified",
+                            "confidence_score": confidence_score
+                        }
+                
+            except Exception as e:
+                print(f"Error processing variant {i}: {e}")
+                continue
+        
+        # If we found a good result, return it
+        if best_result:
+            return best_result
+        
+        # Final fallback: use GPT-4o with combined outputs from all variants
+        all_outputs = []
+        for i, img_variant in enumerate(image_variants[:2]):  # Limit to first 2 variants for speed
+            try:
+                pixel_values = processor(img_variant, return_tensors="pt").pixel_values.to(device)
+                decoder_input_ids = processor.tokenizer("<s_cord-v2>", add_special_tokens=False, return_tensors="pt").input_ids.to(device)
+                
+                generated_ids = model.generate(
+                    pixel_values,
+                    decoder_input_ids=decoder_input_ids,
+                    max_length=512,
+                    early_stopping=True,
+                    num_beams=3,
+                    do_sample=False,
+                    num_return_sequences=1,
+                )
+                
+                output = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                all_outputs.append(f"Variant {i}: {output}")
+            except Exception as e:
+                print(f"Error processing variant {i} in fallback: {e}")
+        
+        combined_text = "\n".join(all_outputs)
+        
+        # Try direct GPT-4o analysis as final attempt
+        completion = await run_in_threadpool(
+            lambda: openai.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": """
+                    You are analyzing OCR text from what might be a Spotify playlist screenshot.
+                    Extract any playlist information you can find, even if imperfect.
+                    
+                    Return JSON with:
+                    {
+                        "playlist_name": "name or null",
+                        "song_titles": ["title1", "title2", ...],
+                        "artist_names": ["artist1", "artist2", ...],
+                        "duration": "duration string or null",
+                        "song_count": number or null,
+                        "confidence": "high/medium/low"
+                    }
+                    
+                    Look for any text that could be song titles, artist names, or playlist names.
+                    Be generous in extraction even if the OCR text is messy.
+                    """},
+                    {"role": "user", "content": f"Extract playlist information from this OCR text:\n\n{combined_text}"}
+                ]
+            )
+        )
+
+        gpt_response = completion.choices[0].message.content.strip()
+        print(f"Final GPT response: {gpt_response}")
+
+        # Extract JSON from response
+        json_match = re.search(r'\{.*\}', gpt_response, re.DOTALL)
+        if json_match:
+            try:
+                final_data = json.loads(json_match.group())
+                return {
+                    "playlist_data": final_data,
+                    "raw_ocr_text": combined_text,
+                    "source": "gpt_direct_analysis",
+                    "confidence_score": 1
+                }
+            except json.JSONDecodeError:
+                print("Failed to parse final JSON from GPT response")
+        
+        # Return empty result if nothing found
+        return {
+            "playlist_data": {
+                "playlist_name": None,
+                "song_titles": [],
+                "artist_names": [],
+                "duration": None,
+                "song_count": None,
+                "confidence": "low"
+            },
+            "raw_ocr_text": combined_text,
+            "source": "no_playlist_detected",
+            "confidence_score": 0
+        }
+        
+    except Exception as e:
+        print(f"Error in playlist recognition: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing image: {str(e)}")
 
 # Test endpoint
 @app.get("/test-embedding")

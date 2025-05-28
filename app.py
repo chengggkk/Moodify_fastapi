@@ -251,8 +251,6 @@ OUTPUT REQUIREMENTS:
 - Include confidence ratings and evidence citations
 - Use rich, detailed language with specific examples
 - Conclude with comprehensive thematic and emotional summary
-
-Generate this multi-expert analysis in Chinese, ensuring thorough exploration from all three perspectives.
 """
 
 def create_aot_story_prompt(analysis: str, custom_story: str = None) -> str:
@@ -327,7 +325,6 @@ OUTPUT REQUIREMENTS:
 - Use sophisticated narrative techniques
 - Conclude with emotionally satisfying resolution
 
-Generate this algorithmically-crafted story in Chinese, demonstrating systematic creativity and emotional intelligence.
 """
     
     return base_prompt
@@ -384,7 +381,6 @@ QUALITY VALIDATION:
 - Maintain emotional nuance and complexity
 - Ensure comprehensive coverage of emotional dimensions
 
-Generate the definitive mood analysis in Chinese, integrating the strongest insights from all three attempts while maintaining analytical rigor and emotional accuracy.
 """
     
     final_completion = openai.chat.completions.create(
@@ -422,7 +418,6 @@ IMPROVEMENT AREAS: Identify any missing elements or inaccuracies
 CONFIDENCE RATING: Rate analysis quality (1-10) with justification
 ENHANCEMENT SUGGESTIONS: Provide specific improvement recommendations
 
-Provide verification results in Chinese with constructive feedback.
 """
     
     verification = openai.chat.completions.create(

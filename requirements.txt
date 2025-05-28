@@ -6,3 +6,8 @@ torch
 transformers
 openai
 einops
+opencv-python
+pillow
+numpy
+python-multipart
+aiofiles

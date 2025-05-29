@@ -20,18 +20,21 @@ class LyricsResponse(BaseModel):
     lyrics: str 
     source: str
 
+@lyrics_router.post("/search", response_model=LyricsResponse)
 async def get_lyrics(request: LyricsRequest):
     try:
         genius_result = await search_genius_api(request.title, request.artist)
 
         if genius_result:
-            genius_url = genius_result.get("url", "https://genius.com")
-            return LyricsResponse(
+            genius_url = genius_result.get("url", "")
+            if genius_url:
+                processed_content = await process_lyrics_content(genius_url)
+                return LyricsResponse(
                 title=request.title,
                 artist=request.artist,
-                lyrics=genius_url,
+                lyrics=processed_content,
                 source="genius"
-            )
+                )
 
         search_urls = await search_web_for_lyrics(request.title, request.artist)
 
@@ -140,7 +143,7 @@ async def process_lyrics_content(url: str) -> str:
     except requests.RequestException:
         return "Content extraction failed"
 
-@lyrics_router.post("/search", response_model=LyricsResponse)
+
 async def format_with_mistral(content: str) -> str:
     mistral_api_key = os.getenv("MISTRAL_API_KEY")
     if not mistral_api_key:
@@ -162,8 +165,7 @@ async def format_with_mistral(content: str) -> str:
     try:
         response = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)
         response.raise_for_status()
-        lyrics=response.json()["choices"][0]["message"]["content"]
-        return lyrics
+        return response.json()["choices"][0]["message"]["content"]
     except requests.RequestException as e:
         return f"Failed to format lyrics with Mistral: {str(e)}"
 

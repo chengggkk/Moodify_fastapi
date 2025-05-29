@@ -20,6 +20,11 @@ class LyricsResponse(BaseModel):
     lyrics: str 
     source: str
 
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+GENIUS_API_KEY = os.getenv("GENIUS_API_KEY")
+
+
 @lyrics_router.post("/search", response_model=LyricsResponse)
 async def get_lyrics(request: LyricsRequest):
     try:
@@ -71,11 +76,10 @@ def calculate_song_similarity(query_artist, query_title, result_artist, result_t
 
 
 async def search_genius_api(title: str, artist: str) -> Optional[dict]:
-    genius_token = os.getenv("GENIUS_API_KEY")
-    if not genius_token:
+    if not GENIUS_API_KEY:
         return None
 
-    headers = {"Authorization": f"Bearer {genius_token}"}
+    headers = {"Authorization": f"Bearer {GENIUS_API_KEY}"}
     params = {"q": f"{artist} {title}"}
 
     try:
@@ -141,6 +145,9 @@ async def process_lyrics_content(url: str) -> str:
         return await format_with_mistral(text)
 
     except requests.RequestException:
+        print(MISTRAL_API_KEY)
+        print(GENIUS_API_KEY)
+        print(BRAVE_API_KEY)
         return "Content extraction failed"
 
 

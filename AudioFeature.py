@@ -13,6 +13,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 import json
 import glob
+import shutil
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,28 @@ BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 # Thread pool for CPU-intensive audio processing
 executor = ThreadPoolExecutor(max_workers=3)
 
+def check_dependencies():
+    """Check if required dependencies are available"""
+    dependencies = {
+        'yt-dlp': False,
+        'ffmpeg': False
+    }
+    
+    try:
+        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
+        dependencies['yt-dlp'] = True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.warning("yt-dlp not found or not working")
+    
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        dependencies['ffmpeg'] = True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        logger.warning("ffmpeg not found or not working")
+    
+    logger.info(f"Dependencies check: {dependencies}")
+    return dependencies
+
 async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist: str) -> Optional[str]:
     """Search for YouTube URL using Brave Search API"""
     try:
@@ -99,91 +122,180 @@ async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist:
         logger.error(f"Error searching for {title} by {artist}: {str(e)}")
         return None
 
-def download_audio(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Download audio from YouTube URL using subprocess with MP3 conversion"""
+def download_with_cookies_from_browser(youtube_url: str, output_dir: str, browser: str = "chrome") -> Optional[str]:
+    """Download using cookies extracted directly from browser"""
     try:
         command = [
             "yt-dlp",
-            "--cookies", "cookies.txt",
+            "--cookies-from-browser", browser,
             "-x", "--audio-format", "mp3",
+            "--audio-quality", "0",  # Best quality
             "--output", f"{output_dir}/%(title)s.%(ext)s",
+            "--ffmpeg-location", shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
             "--prefer-ffmpeg",
+            "--no-warnings",
             youtube_url
         ]
         
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logger.info(f"Download successful for {youtube_url}")
-        logger.debug(f"yt-dlp output: {result.stdout}")
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
         
-        # Look for audio files (prioritize mp3, but accept others)
-        audio_files = []
-        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
-            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
-        
-        if audio_files:
-            audio_file = audio_files[0]
-            logger.info(f"Found audio file: {audio_file}")
-            return audio_file
+        if result.returncode == 0:
+            logger.info(f"Successfully downloaded with {browser} cookies: {youtube_url}")
+            return find_audio_file(output_dir)
         else:
-            logger.error(f"No audio file found after download in {output_dir}")
-            all_files = os.listdir(output_dir)
-            logger.error(f"Files in directory: {all_files}")
+            logger.warning(f"Failed to download with {browser} cookies: {result.stderr}")
             return None
             
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Download with conversion failed for {youtube_url}: {e}")
-        logger.error(f"Command stderr: {e.stderr}")
-        logger.error(f"Command stdout: {e.stdout}")
-        
-        # Check if files were downloaded despite conversion error
-        audio_files = []
-        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
-            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
-        
-        if audio_files:
-            logger.info(f"Found audio file despite conversion error: {audio_files[0]}")
-            return audio_files[0]
-        
+    except subprocess.TimeoutExpired:
+        logger.error(f"Download timeout for {youtube_url}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error downloading {youtube_url}: {str(e)}")
+        logger.error(f"Error downloading with {browser} cookies: {str(e)}")
         return None
 
-def download_audio_fallback(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Fallback download method - get best audio without conversion"""
+def download_without_cookies(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Download without cookies using various user agents and methods"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    ]
+    
+    for i, user_agent in enumerate(user_agents):
+        try:
+            command = [
+                "yt-dlp",
+                "--user-agent", user_agent,
+                "-x", "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "--output", f"{output_dir}/%(title)s.%(ext)s",
+                "--ffmpeg-location", shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
+                "--prefer-ffmpeg",
+                "--no-warnings",
+                "--extractor-retries", "3",
+                "--fragment-retries", "3",
+                youtube_url
+            ]
+            
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            
+            if result.returncode == 0:
+                logger.info(f"Successfully downloaded without cookies (attempt {i+1}): {youtube_url}")
+                return find_audio_file(output_dir)
+            else:
+                logger.warning(f"Attempt {i+1} failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout on attempt {i+1} for {youtube_url}")
+            continue
+        except Exception as e:
+            logger.warning(f"Attempt {i+1} error: {str(e)}")
+            continue
+    
+    return None
+
+def download_best_audio_only(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Download best audio without conversion, then convert manually with ffmpeg"""
     try:
+        # First, download the best audio format available
         command = [
             "yt-dlp",
-            "--cookies", "cookies.txt",
-            "-f", "bestaudio",
+            "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
             "--output", f"{output_dir}/%(title)s.%(ext)s",
+            "--no-warnings",
+            "--extractor-retries", "5",
             youtube_url
         ]
         
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logger.info(f"Fallback download successful for {youtube_url}")
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
         
-        # Look for any audio files
-        audio_files = []
-        for ext in ["*.webm", "*.m4a", "*.mp3", "*.wav", "*.ogg"]:
-            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
-        
-        if audio_files:
-            logger.info(f"Fallback found audio file: {audio_files[0]}")
-            return audio_files[0]
-        else:
-            logger.error(f"No audio file found after fallback download in {output_dir}")
+        if result.returncode != 0:
+            logger.error(f"Failed to download audio: {result.stderr}")
             return None
+        
+        # Find the downloaded file
+        audio_file = find_audio_file(output_dir)
+        if not audio_file:
+            return None
+        
+        # Convert to MP3 using ffmpeg directly
+        output_mp3 = os.path.join(output_dir, "converted_audio.mp3")
+        ffmpeg_command = [
+            "ffmpeg",
+            "-i", audio_file,
+            "-acodec", "libmp3lame",
+            "-ab", "192k",
+            "-ar", "44100",
+            "-y",  # Overwrite output file
+            output_mp3
+        ]
+        
+        ffmpeg_result = subprocess.run(ffmpeg_command, capture_output=True, text=True, timeout=60)
+        
+        if ffmpeg_result.returncode == 0 and os.path.exists(output_mp3):
+            logger.info(f"Successfully converted to MP3: {output_mp3}")
+            # Remove original file to save space
+            try:
+                os.remove(audio_file)
+            except:
+                pass
+            return output_mp3
+        else:
+            logger.warning(f"FFmpeg conversion failed, using original file: {audio_file}")
+            return audio_file
             
-    except Exception as e:
-        logger.error(f"Fallback download failed for {youtube_url}: {str(e)}")
+    except subprocess.TimeoutExpired:
+        logger.error(f"Download timeout for {youtube_url}")
         return None
+    except Exception as e:
+        logger.error(f"Error in best audio download: {str(e)}")
+        return None
+
+def find_audio_file(directory: str) -> Optional[str]:
+    """Find any audio file in the directory"""
+    audio_extensions = ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg", "*.aac"]
+    
+    for ext in audio_extensions:
+        files = glob.glob(os.path.join(directory, ext))
+        if files:
+            return files[0]
+    
+    return None
+
+def download_audio_comprehensive(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Comprehensive download strategy with multiple fallbacks"""
+    logger.info(f"Starting comprehensive download for: {youtube_url}")
+    
+    # Strategy 1: Try with browser cookies (Chrome first, then Firefox)
+    for browser in ["chrome", "firefox", "edge", "safari"]:
+        logger.info(f"Trying {browser} cookies...")
+        result = download_with_cookies_from_browser(youtube_url, output_dir, browser)
+        if result:
+            return result
+        # Small delay between attempts
+        import time
+        time.sleep(1)
+    
+    # Strategy 2: Try without cookies with different user agents
+    logger.info("Trying without cookies...")
+    result = download_without_cookies(youtube_url, output_dir)
+    if result:
+        return result
+    
+    # Strategy 3: Download best audio and convert manually
+    logger.info("Trying best audio download with manual conversion...")
+    result = download_best_audio_only(youtube_url, output_dir)
+    if result:
+        return result
+    
+    logger.error(f"All download strategies failed for: {youtube_url}")
+    return None
 
 def extract_features_from_audio_file(audio_path: str) -> Dict:
     """Extract audio features from local audio file using librosa"""
     try:
-        # Load audio with librosa (librosa can handle various formats)
-        y, sr = librosa.load(audio_path, sr=22050, duration=30)  # Limit to 30 seconds
+        # Load audio with librosa (supports many formats)
+        y, sr = librosa.load(audio_path, sr=22050, duration=30)
         
         if len(y) == 0:
             raise ValueError("Empty audio file")
@@ -234,24 +346,26 @@ def extract_features_from_audio_file(audio_path: str) -> Dict:
         raise
 
 def extract_features_from_youtube(url: str) -> Dict:
-    """Extract audio features from YouTube URL by downloading and processing"""
+    """Extract audio features from YouTube URL using comprehensive download strategy"""
     temp_dir = None
     
     try:
+        # Check dependencies first
+        deps = check_dependencies()
+        if not deps['yt-dlp']:
+            raise ValueError("yt-dlp is not available")
+        if not deps['ffmpeg']:
+            logger.warning("ffmpeg not found - audio conversion may fail")
+        
         # Create temporary directory
         temp_dir = tempfile.mkdtemp()
         logger.info(f"Created temp directory: {temp_dir}")
         
-        # Try primary download method first
-        audio_path = download_audio(url, temp_dir)
+        # Use comprehensive download strategy
+        audio_path = download_audio_comprehensive(url, temp_dir)
         
-        # If primary method fails, try fallback
         if not audio_path:
-            logger.info(f"Primary download failed, trying fallback for {url}")
-            audio_path = download_audio_fallback(url, temp_dir)
-            
-        if not audio_path:
-            raise ValueError("Failed to download audio from YouTube using both methods")
+            raise ValueError("Failed to download audio from YouTube using all available methods")
         
         logger.info(f"Processing audio file: {audio_path}")
         
@@ -268,15 +382,9 @@ def extract_features_from_youtube(url: str) -> Dict:
         # Cleanup temporary files and directory
         if temp_dir and os.path.exists(temp_dir):
             try:
-                # Remove all files in temp directory
-                for file in os.listdir(temp_dir):
-                    file_path = os.path.join(temp_dir, file)
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                        logger.debug(f"Removed temp file: {file_path}")
-                # Remove the directory
-                os.rmdir(temp_dir)
-                logger.debug(f"Removed temp directory: {temp_dir}")
+                import shutil
+                shutil.rmtree(temp_dir)
+                logger.debug(f"Cleaned up temp directory: {temp_dir}")
             except Exception as cleanup_error:
                 logger.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
 
@@ -346,6 +454,11 @@ async def analyze_audio_features(batch: TrackBatch):
         all_results = []
         total_tracks = len(batch.tracks)
         
+        # Check dependencies at startup
+        deps = check_dependencies()
+        if not deps['yt-dlp']:
+            raise HTTPException(status_code=500, detail="yt-dlp is not available")
+        
         # Process tracks in batches of 3
         for i in range(0, total_tracks, 3):
             batch_tracks = batch.tracks[i:i+3]
@@ -354,9 +467,9 @@ async def analyze_audio_features(batch: TrackBatch):
             batch_results = await process_track_batch(batch_tracks)
             all_results.extend(batch_results)
             
-            # Small delay between batches to be respectful to APIs
+            # Delay between batches to avoid rate limiting
             if i + 3 < total_tracks:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
         
         # Calculate statistics
         successful = len([r for r in all_results if r.audio_features is not None])
@@ -388,4 +501,9 @@ async def analyze_single_track(track: TrackRequest):
 @audio_feature_router.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "audio_feature_analyzer"}
+    deps = check_dependencies()
+    return {
+        "status": "healthy" if deps['yt-dlp'] else "degraded",
+        "service": "audio_feature_analyzer",
+        "dependencies": deps
+    }

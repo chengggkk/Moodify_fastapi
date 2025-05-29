@@ -18,6 +18,7 @@ from fastapi.concurrency import run_in_threadpool
 from PIL import Image, ImageEnhance, ImageFilter
 from donut import donut_router
 from Classic import music_router
+from Lyrics import lyrics_router
 
 load_dotenv()
 
@@ -1313,6 +1314,7 @@ Generate your masterpiece story in English, demonstrating peak creative storytel
 
 app.include_router(donut_router)
 app.include_router(music_router)
+app.include_router(lyrics_router)
 
 if __name__ == "__main__":
     import uvicorn

@@ -46,20 +46,11 @@ class MusicRecommendationService:
     def detect_language_and_count(self, user_prompt: str) -> tuple[str, int]:
         """Detect language preference and song count from user prompt"""
         prompt_lower = user_prompt.lower()
-        
-        # Extract number of songs requested
-        song_count = 15  # default
-        
+                
         # Look for specific numbers
         import re
         numbers = re.findall(r'\b(\d+)\b', user_prompt)
-        if numbers:
-            try:
-                requested_count = int(numbers[0])
-                if 1 <= requested_count <= 50:  # reasonable limits
-                    song_count = requested_count
-            except:
-                pass
+        
         
         # Detect language preference
         language_indicators = {
@@ -75,7 +66,7 @@ class MusicRecommendationService:
                 detected_language = lang
                 break
         
-        return detected_language, song_count
+        return detected_language
     
     async def generate_search_queries_with_mistral(self, user_prompt: str) -> List[str]:
         """Step 1: Generate multiple refined search queries using Mistral AI with language detection"""
@@ -299,7 +290,7 @@ class MusicRecommendationService:
     
     async def generate_songs_with_openai(self, user_prompt: str, search_results: List[Dict], html_content: str, queries_used: List[str]) -> List[Song]:
         """Step 3: Generate song recommendations with language and count awareness"""
-        detected_language, requested_count = self.detect_language_and_count(user_prompt)
+        detected_language = self.detect_language_and_count(user_prompt)
         
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -317,7 +308,7 @@ class MusicRecommendationService:
             html_section = f"\nExtracted Website Content:\n{html_content}\n"
         
         # Enhanced system prompt with language preservation
-        system_prompt = f"""You are a music recommendation expert. Based on the user's request, search results, and website content, recommend exactly {requested_count} songs.
+        system_prompt = f"""You are a music recommendation expert. Based on the user's request, search results, and website content, recommend exact songs.
 
         CRITICAL REQUIREMENTS:
         1. Return EXACTLY {user_prompt} songs if user request in the prompt (not more, not less)
@@ -334,7 +325,7 @@ class MusicRecommendationService:
         - Japanese: Preserve titles like "桜", "Jupiter"
         - English: Use standard English titles
         
-        Return ONLY a valid JSON array with exactly {requested_count} objects containing 'title' and 'artist' fields (required), 
+        Return ONLY a valid JSON array containing 'title' and 'artist' fields (required), 
         and optionally 'album' and 'publish_year' fields. No additional text or formatting.
         
         Example format for Korean:
@@ -346,12 +337,12 @@ class MusicRecommendationService:
         user_message = f"""User Request: {user_prompt}
 
 Language Preference: {detected_language}
-Requested Count: {requested_count} songs
+Requested Count(if request): (user's prompt:{user_prompt}) songs
 
 {search_context}
 {html_section}
 
-Generate exactly {requested_count} songs in {detected_language} preference, preserving original language titles and artist names."""
+Generate exactly {user_prompt} songs(if request) in {detected_language} preference, preserving original language titles and artist names."""
         
         payload = {
             "model": "gpt-4o-mini",
@@ -373,15 +364,6 @@ Generate exactly {requested_count} songs in {detected_language} preference, pres
             # Parse JSON response
             songs_data = json.loads(content)
             
-            # Ensure we have exactly the requested number of songs
-            if len(songs_data) > requested_count:
-                songs_data = songs_data[:requested_count]
-            elif len(songs_data) < requested_count:
-                # Pad with fallback songs if needed
-                fallback_songs = self.create_fallback_songs(user_prompt, detected_language)
-                while len(songs_data) < requested_count and fallback_songs:
-                    songs_data.append(fallback_songs.pop(0).__dict__)
-            
             # Create Song objects
             songs = []
             for song in songs_data:
@@ -400,15 +382,15 @@ Generate exactly {requested_count} songs in {detected_language} preference, pres
                         artist=str(song.get("artist", "Unknown Artist"))
                     ))
             
-            return songs[:requested_count]  # Ensure exact count
+            return songs 
             
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}")
             print(f"Response content: {content}")
-            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
+            return self.create_fallback_songs(user_prompt, detected_language)
         except Exception as e:
             print(f"OpenAI generation error: {e}")
-            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
+            return self.create_fallback_songs(user_prompt, detected_language)
     
     def create_fallback_songs(self, prompt: str, detected_language: str) -> List[Song]:
         """Create language-appropriate fallback songs"""

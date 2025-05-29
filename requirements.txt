@@ -1,18 +1,38 @@
+# Core FastAPI dependencies
 fastapi
 uvicorn
 pydantic
 python-dotenv
+python-multipart
+aiofiles
+httpx
+
+# Audio processing and analysis
+librosa
+soundfile
+scipy
+numpy
+
+# YouTube downloading
+yt-dlp
+
+# HTTP client for API calls
+aiohttp
+
+# Existing ML/AI dependencies
 torch
 transformers
 openai
 einops
 opencv-python
 pillow
-numpy
-python-multipart
-aiofiles
 protobuf
 sentencepiece
-httpx
 beautifulsoup4
 mistralai
+
+# Additional audio/video processing (optional but recommended)
+ffmpeg-python
+
+# Logging and utilities
+requests

@@ -17,6 +17,7 @@ import io
 from fastapi.concurrency import run_in_threadpool
 from PIL import Image, ImageEnhance, ImageFilter
 from donut import donut_router
+from Classic import music_router
 
 load_dotenv()
 
@@ -1311,6 +1312,7 @@ Generate your masterpiece story in English, demonstrating peak creative storytel
         return {"error": f"Error generating creative story: {str(e)}", "type": type(e).__name__}
 
 app.include_router(donut_router)
+app.include_router(music_router)
 
 if __name__ == "__main__":
     import uvicorn

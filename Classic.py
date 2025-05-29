@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import httpx
@@ -6,8 +6,11 @@ import asyncio
 import json
 import os
 from datetime import datetime
+from bs4 import BeautifulSoup
+import re
 
-app = FastAPI(title="Music Recommendation API", version="1.0.0")
+# Create router with prefix and tags
+music_router = APIRouter(prefix="/music", tags=["music"])
 
 # Request/Response Models
 class MusicPrompt(BaseModel):
@@ -71,8 +74,8 @@ class MusicRecommendationService:
             # Fallback: create basic search query from prompt
             return f"{user_prompt} songs music"
     
-    async def search_with_brave(self, query: str) -> List[Dict[str, Any]]:
-        """Step 2: Search using Brave Search API"""
+    async def search_with_brave(self, query: str) -> tuple[List[Dict[str, Any]], List[str]]:
+        """Step 2: Search using Brave Search API and return results + URLs"""
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
@@ -91,13 +94,65 @@ class MusicRecommendationService:
             response = await self.client.get(BRAVE_SEARCH_URL, headers=headers, params=params)
             response.raise_for_status()
             search_results = response.json()
-            return search_results.get("web", {}).get("results", [])
+            results = search_results.get("web", {}).get("results", [])
+            
+            # Extract URLs for HTML parsing
+            urls = [result.get("url", "") for result in results if result.get("url")]
+            
+            return results, urls
         except Exception as e:
             print(f"Brave search error: {e}")
-            return []
+            return [], []
     
-    async def generate_songs_with_openai(self, user_prompt: str, search_results: List[Dict]) -> List[Song]:
-        """Step 3: Analyze search results and generate song recommendations using OpenAI"""
+    async def extract_html_content(self, url: str) -> str:
+        """Extract and clean HTML content using BeautifulSoup"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = await self.client.get(url, headers=headers, follow_redirects=True)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style", "nav", "footer", "header"]):
+                script.decompose()
+            
+            # Extract text content
+            text = soup.get_text()
+            
+            # Clean up text
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = ' '.join(chunk for chunk in chunks if chunk)
+            
+            # Limit text length
+            return text[:2000] if len(text) > 2000 else text
+            
+        except Exception as e:
+            print(f"HTML extraction error for {url}: {e}")
+            return ""
+    
+    async def extract_music_info_from_html(self, urls: List[str]) -> str:
+        """Extract music-related information from multiple URLs"""
+        extracted_content = []
+        
+        for url in urls[:3]:  # Limit to first 3 URLs to avoid too many requests
+            content = await self.extract_html_content(url)
+            if content:
+                # Look for music-related keywords
+                music_keywords = ['song', 'artist', 'album', 'music', 'track', 'singer', 'band', 'OST', 'soundtrack']
+                content_lower = content.lower()
+                
+                if any(keyword in content_lower for keyword in music_keywords):
+                    extracted_content.append(content)
+        
+        return "\n\n".join(extracted_content)
+    
+    async def generate_songs_with_openai(self, user_prompt: str, search_results: List[Dict], html_content: str) -> List[Song]:
+        """Step 3: Analyze search results and HTML content to generate song recommendations using OpenAI"""
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json"
@@ -108,9 +163,17 @@ class MusicRecommendationService:
         for result in search_results[:5]:  # Use top 5 results
             search_context += f"Title: {result.get('title', '')}\nSnippet: {result.get('description', '')}\n\n"
         
-        system_prompt = """You are a music recommendation expert. Based on the user's request and search results, 
-        recommend 8-12 songs that match their criteria. Return ONLY a valid JSON array with objects containing 
-        'title' and 'artist' fields. Do not include any additional text or formatting.
+        # Add HTML content if available
+        html_section = ""
+        if html_content:
+            html_section = f"\nExtracted Website Content:\n{html_content[:1500]}\n"  # Limit to 1500 chars
+        
+        system_prompt = """You are a music recommendation expert. Based on the user's request, search results, 
+        and extracted website content, recommend 8-12 songs that match their criteria. 
+        Use the website content to find actual song titles and artists when possible.
+        
+        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields. 
+        Do not include any additional text or formatting.
         
         Example format:
         [
@@ -122,8 +185,9 @@ class MusicRecommendationService:
 
 Search Results Context:
 {search_context}
+{html_section}
 
-Based on the user's request and the search context, provide song recommendations in the specified JSON format."""
+Based on the user's request, search context, and website content, provide song recommendations in the specified JSON format."""
         
         payload = {
             "model": "gpt-4o-mini",
@@ -131,7 +195,7 @@ Based on the user's request and the search context, provide song recommendations
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
-            "max_tokens": 1000,
+            "max_tokens": 1200,
             "temperature": 0.7
         }
         
@@ -192,7 +256,7 @@ Based on the user's request and the search context, provide song recommendations
 # Initialize service
 music_service = MusicRecommendationService()
 
-@app.post("/recommend-music", response_model=MusicResponse)
+@music_router.post("/recommend", response_model=MusicResponse)
 async def recommend_music(request: MusicPrompt):
     """
     Main endpoint for music recommendations
@@ -200,7 +264,8 @@ async def recommend_music(request: MusicPrompt):
     Process:
     1. Analyze prompt with Mistral AI to generate search query
     2. Search with Brave Search API synchronously 
-    3. Analyze results and generate recommendations with OpenAI
+    3. Extract HTML content from search result URLs using BeautifulSoup
+    4. Analyze results and HTML content to generate recommendations with OpenAI
     
     Returns JSON formatted song list with title and artist
     """
@@ -208,11 +273,14 @@ async def recommend_music(request: MusicPrompt):
         # Step 1: Analyze prompt and generate search query
         search_query = await music_service.analyze_prompt_with_mistral(request.prompt)
         
-        # Step 2: Search with Brave API
-        search_results = await music_service.search_with_brave(search_query)
+        # Step 2: Search with Brave API and get URLs
+        search_results, urls = await music_service.search_with_brave(search_query)
         
-        # Step 3: Generate song recommendations with OpenAI
-        songs = await music_service.generate_songs_with_openai(request.prompt, search_results)
+        # Step 2.5: Extract HTML content from search result URLs
+        html_content = await music_service.extract_music_info_from_html(urls)
+        
+        # Step 3: Generate song recommendations with OpenAI using search results and HTML content
+        songs = await music_service.generate_songs_with_openai(request.prompt, search_results, html_content)
         
         return MusicResponse(
             songs=songs,
@@ -223,18 +291,18 @@ async def recommend_music(request: MusicPrompt):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
-@app.get("/health")
+@music_router.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.on_event("shutdown")
+@music_router.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown"""
     await music_service.close()
 
 # Example usage endpoints for testing
-@app.get("/examples")
+@music_router.get("/examples")
 async def get_examples():
     """Get example prompts for testing"""
     return {
@@ -248,6 +316,18 @@ async def get_examples():
         ]
     }
 
+# Example of how to use this router in main app:
+"""
+from fastapi import FastAPI
+from this_router_file import music_router
+
+app = FastAPI(title="Music Recommendation API", version="1.0.0")
+app.include_router(music_router)
+
+# Required dependencies:
+# pip install fastapi uvicorn httpx pydantic beautifulsoup4
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+"""

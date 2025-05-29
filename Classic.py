@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import httpx
 import asyncio
 import json
@@ -21,8 +21,8 @@ class MusicPrompt(BaseModel):
 class Song(BaseModel):
     title: str
     artist: str
-    album: str = None
-    publish_year: int = None
+    album: Optional[str] = None
+    publish_year: Optional[int] = None
 
 class MusicResponse(BaseModel):
     songs: List[Song]

@@ -13,3 +13,6 @@ python-multipart
 aiofiles
 protobuf
 sentencepiece
+httpx
+beautifulsoup4
+mistralai

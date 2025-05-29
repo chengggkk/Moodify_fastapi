@@ -65,7 +65,7 @@ class MusicRecommendationService:
                     
                     Examples:
                     Input: "give me K-drama romantic OST"
-                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST 2024"]
+                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST this year"]
                     
                     Input: "taylor swift sad songs"
                     Output: ["taylor swift sad songs", "taylor swift heartbreak ballads", "taylor swift emotional songs best"]
@@ -248,20 +248,36 @@ class MusicRecommendationService:
         if html_content:
             html_section = f"\nExtracted Website Content:\n{html_content[:2000]}\n"  # Limit to 2000 chars
         
-        system_prompt = """You are a music recommendation expert. Based on the user's request, multiple search results 
-        from different refined queries, and extracted website content, recommend 10-15 songs that match their criteria. 
-        
-        Use the diverse search results and website content to find actual song titles and artists. 
-        The search was performed using multiple optimized queries to ensure comprehensive coverage.
-        
-        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields. 
-        Do not include any additional text or formatting.
-        
-        Example format:
-        [
-            {"title": "Song Name", "artist": "Artist Name"},
-            {"title": "Another Song", "artist": "Another Artist"}
-        ]"""
+        system_prompt = """You are a music recommendation expert with deep knowledge of global music across genres and decades. Your goal is to recommend 10–15 songs that match the user’s request using detailed reasoning and validation.
+
+You are given:
+1. The user's request (mood, genre, story, vibe, theme, etc.).
+2. Multiple search results derived from refined queries targeting various musical aspects (e.g., emotion, lyrics, historical context).
+3. Extracted content from song lyrics, reviews, playlist curation sites, forums, and other sources.
+
+Follow these steps:
+- **Step 1 (Comprehension):** Understand the user's intent. What mood, style, or theme are they requesting?
+- **Step 2 (Cross-reference):** Analyze the search results and extracted content. Identify recurring song mentions, lyrical themes, or genre tags that align with the user’s intent.
+- **Step 3 (Self-consistency):** Choose songs that are consistently relevant across multiple sources.
+- **Step 4 (Emotion tuning):** Ensure the tone, emotion, or storytelling of the song matches the user's desired theme (e.g., nostalgic, hopeful, dark, energetic).
+- **Step 5 (Diversity):** Provide variety across eras, languages (if applicable), or styles while keeping the core theme consistent.
+- **Step 6 (Validate metadata):** Where possible, confirm the album name and year of publication.
+
+⚠️ Output Constraints:
+- Return ONLY a **valid JSON array** of up to 15 songs.
+- Each object must have: 
+  - `"title"` (string),
+  - `"artist"` (string),
+  - `"album"` (string or null),
+  - `"publish year"` (number or null)
+- NO extra text, explanation, or formatting outside the JSON.
+
+✅ Example output:
+[
+  {"title": "Bohemian Rhapsody", "artist": "Queen", "album": "A Night at the Opera", "publish year": 1975},
+  {"title": "Someone Like You", "artist": "Adele", "album": "21", "publish year": 2011},
+  ...
+]"""
         
         user_message = f"""User Request: {user_prompt}
 

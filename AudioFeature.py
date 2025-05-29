@@ -1,5 +1,5 @@
 # audio_feature_router.py
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import asyncio
@@ -19,9 +19,7 @@ from ytmusicapi import YTMusic
 logger = logging.getLogger(__name__)
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
-
-# Initialize YTMusic
-ytmusic = YTMusic()
+ytmusic = YTMusic()  # Anonymous mode (no cookies)
 
 # Pydantic models
 class TrackRequest(BaseModel):
@@ -59,216 +57,85 @@ class BatchResponse(BaseModel):
 # Thread pool for CPU-intensive audio processing
 executor = ThreadPoolExecutor(max_workers=3)
 
-def check_dependencies():
-    """Check if required dependencies are available"""
-    dependencies = {
-        'yt-dlp': False,
-        'ffmpeg': False,
-        'ytmusicapi': False
-    }
-    
+def download_song_from_youtube_music(title: str, artist: str):
+    """Download song from YouTube Music following your exact pattern"""
     try:
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
-        dependencies['yt-dlp'] = True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("yt-dlp not found or not working")
-    
-    try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        dependencies['ffmpeg'] = True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("ffmpeg not found or not working")
-    
-    try:
-        ytmusic.search("test", filter="songs", limit=1)
-        dependencies['ytmusicapi'] = True
-    except Exception as e:
-        logger.warning(f"ytmusicapi not working: {e}")
-    
-    logger.info(f"Dependencies check: {dependencies}")
-    return dependencies
-
-def search_youtube_music(title: str, artist: str) -> Optional[Dict]:
-    """Search for track using YouTube Music API and return YouTube Music URL"""
-    try:
-        query = f"{title} {artist}"
-        logger.info(f"Searching YouTube Music for: {query}")
-        
-        results = ytmusic.search(query, filter="songs", limit=5)
-        
+        # 1. Search on YouTube Music
+        results = ytmusic.search(query=f"{title} {artist}", filter="songs")
         if not results:
-            logger.warning(f"No results found for: {query}")
-            return None
+            raise Exception("Song not found on YouTube Music")
         
-        # Find the best match
-        best_match = None
-        for result in results:
-            try:
-                result_title = result.get('title', '').lower()
-                result_artists = [artist['name'].lower() for artist in result.get('artists', [])]
-                
-                title_match = title.lower() in result_title or result_title in title.lower()
-                artist_match = any(artist.lower() in ra or ra in artist.lower() for ra in result_artists)
-                
-                if title_match and artist_match:
-                    best_match = result
-                    break
-                elif title_match or artist_match:
-                    if not best_match:
-                        best_match = result
-            except Exception as e:
-                logger.warning(f"Error processing search result: {e}")
-                continue
+        song = results[0]
+        video_id = song["videoId"]
+        duration = song["duration"]
+        yt_url = f"https://music.youtube.com/watch?v={video_id}"
         
-        if not best_match:
-            best_match = results[0]
+        # 2. Prepare download directory
+        tmpdir = tempfile.mkdtemp()
+        output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
         
-        video_id = best_match.get('videoId')
-        if not video_id:
-            logger.error(f"No video ID found in result: {best_match}")
-            return None
-        
-        track_info = {
-            'title': best_match.get('title', title),
-            'artists': [artist['name'] for artist in best_match.get('artists', [])],
-            'duration': best_match.get('duration', 'Unknown'),
-            'video_id': video_id,
-            'youtube_music_url': f"https://music.youtube.com/watch?v={video_id}",
-            'youtube_url': f"https://www.youtube.com/watch?v={video_id}"  # Fallback URL
-        }
-        
-        logger.info(f"Found match: {track_info['title']} by {', '.join(track_info['artists'])}")
-        return track_info
-        
-    except Exception as e:
-        logger.error(f"Error searching YouTube Music for {title} by {artist}: {str(e)}")
-        return None
-
-def download_from_youtube_music(youtube_music_url: str, output_dir: str) -> Optional[str]:
-    """Download audio from YouTube Music URL using yt-dlp"""
-    try:
-        # Extract video ID from YouTube Music URL
-        if "music.youtube.com" in youtube_music_url:
-            video_id = youtube_music_url.split("v=")[1].split("&")[0]
-            # Use both YouTube Music URL and regular YouTube URL as fallbacks
-            urls_to_try = [
-                youtube_music_url,
-                f"https://www.youtube.com/watch?v={video_id}"
-            ]
-        else:
-            urls_to_try = [youtube_music_url]
-        
-        for url in urls_to_try:
-            logger.info(f"Trying to download from: {url}")
-            
-            # Strategy 1: Try with browser cookies
-            for browser in ["chrome", "firefox", "edge"]:
-                try:
-                    command = [
-                        "yt-dlp",
-                        "--cookies-from-browser", browser,
-                        "-x", "--audio-format", "mp3",
-                        "--audio-quality", "0",
-                        "--output", f"{output_dir}/%(title)s.%(ext)s",
-                        "--prefer-ffmpeg",
-                        "--no-warnings",
-                        url
-                    ]
-                    
-                    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-                    
-                    if result.returncode == 0:
-                        audio_file = find_audio_file(output_dir)
-                        if audio_file:
-                            logger.info(f"Successfully downloaded with {browser} cookies from {url}")
-                            return audio_file
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Timeout with {browser} cookies")
-                    continue
-                except Exception as e:
-                    logger.warning(f"Failed with {browser} cookies: {str(e)}")
-                    continue
-            
-            # Strategy 2: Try without cookies
-            try:
-                command = [
+        try:
+            # 3. Run yt-dlp to download audio
+            result = subprocess.run(
+                [
                     "yt-dlp",
                     "-x", "--audio-format", "mp3",
-                    "--audio-quality", "0",
-                    "--output", f"{output_dir}/%(title)s.%(ext)s",
-                    "--prefer-ffmpeg",
-                    "--no-warnings",
-                    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    url
-                ]
-                
-                result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-                
-                if result.returncode == 0:
-                    audio_file = find_audio_file(output_dir)
-                    if audio_file:
-                        logger.info(f"Successfully downloaded without cookies from {url}")
-                        return audio_file
-            except Exception as e:
-                logger.warning(f"Failed without cookies: {str(e)}")
-                continue
+                    "--output", output_path,
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ],
+                capture_output=True,
+                text=True
+            )
             
-            # Strategy 3: Download and convert manually
-            try:
-                command = [
-                    "yt-dlp",
-                    "-f", "bestaudio",
-                    "--output", f"{output_dir}/%(title)s.%(ext)s",
-                    "--no-warnings",
-                    url
-                ]
-                
-                result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-                
-                if result.returncode == 0:
-                    # Find downloaded file and convert with ffmpeg
-                    downloaded_file = find_audio_file(output_dir)
-                    if downloaded_file:
-                        output_mp3 = os.path.join(output_dir, "converted.mp3")
-                        ffmpeg_command = [
-                            "ffmpeg", "-i", downloaded_file,
-                            "-acodec", "libmp3lame", "-ab", "192k",
-                            "-y", output_mp3
-                        ]
-                        
-                        ffmpeg_result = subprocess.run(ffmpeg_command, capture_output=True, timeout=60)
-                        if ffmpeg_result.returncode == 0 and os.path.exists(output_mp3):
-                            os.remove(downloaded_file)  # Remove original
-                            logger.info(f"Successfully converted from {url}")
-                            return output_mp3
-                        else:
-                            logger.info(f"Using original format from {url}")
-                            return downloaded_file
-            except Exception as e:
-                logger.warning(f"Manual conversion failed: {str(e)}")
-                continue
-        
-        logger.error(f"All download strategies failed for {youtube_music_url}")
-        return None
-        
+            if result.returncode != 0:
+                raise Exception(f"yt-dlp error: {result.stderr}")
+            
+            # Find the downloaded file
+            downloaded_file = None
+            for file in os.listdir(tmpdir):
+                if file.endswith(('.mp3', '.webm', '.m4a')):
+                    downloaded_file = os.path.join(tmpdir, file)
+                    break
+            
+            if not downloaded_file:
+                raise Exception("Downloaded file not found")
+            
+            # 4. Return info with file path
+            return {
+                "title": title,
+                "artist": artist,
+                "youtube_music_url": yt_url,
+                "video_id": video_id,
+                "duration": duration,
+                "audio_path": downloaded_file,
+                "temp_dir": tmpdir,
+                "success": True,
+                "error": None
+            }
+            
+        except Exception as e:
+            # Cleanup on error
+            if os.path.exists(tmpdir):
+                shutil.rmtree(tmpdir)
+            raise e
+            
     except Exception as e:
-        logger.error(f"Error downloading from YouTube Music: {str(e)}")
-        return None
-
-def find_audio_file(directory: str) -> Optional[str]:
-    """Find any audio file in the directory"""
-    audio_extensions = ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg", "*.aac"]
-    
-    for ext in audio_extensions:
-        files = glob.glob(os.path.join(directory, ext))
-        if files:
-            return files[0]
-    
-    return None
+        return {
+            "title": title,
+            "artist": artist,
+            "youtube_music_url": None,
+            "video_id": None,
+            "duration": None,
+            "audio_path": None,
+            "temp_dir": None,
+            "success": False,
+            "error": str(e)
+        }
 
 def extract_features_from_audio_file(audio_path: str) -> Dict:
     """Extract audio features from local audio file using librosa"""
     try:
+        # Load audio with librosa
         y, sr = librosa.load(audio_path, sr=22050, duration=30)
         
         if len(y) == 0:
@@ -314,63 +181,57 @@ def extract_features_from_audio_file(audio_path: str) -> Dict:
 def get_audio_features_simple(title: str, artist: str) -> Dict:
     """
     Simple function: input title and artist, get audio features
-    Uses YouTube Music for downloading
+    Uses your exact YouTube Music download pattern
     """
-    temp_dir = None
+    download_result = None
     
     try:
-        result = {
-            "title": title,
-            "artist": artist,
-            "youtube_music_url": None,
-            "video_id": None,
-            "duration": None,
-            "audio_features": None,
+        # Step 1: Download from YouTube Music using your exact pattern
+        download_result = download_song_from_youtube_music(title, artist)
+        
+        if not download_result["success"]:
+            return {
+                "title": title,
+                "artist": artist,
+                "youtube_music_url": None,
+                "video_id": None,
+                "duration": None,
+                "audio_features": None,
+                "error": download_result["error"]
+            }
+        
+        # Step 2: Extract audio features
+        audio_features = extract_features_from_audio_file(download_result["audio_path"])
+        
+        # Step 3: Return complete result
+        return {
+            "title": download_result["title"],
+            "artist": download_result["artist"],
+            "youtube_music_url": download_result["youtube_music_url"],
+            "video_id": download_result["video_id"],
+            "duration": download_result["duration"],
+            "audio_features": audio_features,
             "error": None
         }
-        
-        # Step 1: Search YouTube Music
-        track_info = search_youtube_music(title, artist)
-        if not track_info:
-            result["error"] = "Track not found on YouTube Music"
-            return result
-        
-        # Set track info
-        result["youtube_music_url"] = track_info["youtube_music_url"]
-        result["video_id"] = track_info["video_id"]
-        result["duration"] = track_info["duration"]
-        
-        # Step 2: Download from YouTube Music
-        temp_dir = tempfile.mkdtemp()
-        audio_path = download_from_youtube_music(track_info["youtube_music_url"], temp_dir)
-        
-        if not audio_path:
-            result["error"] = "Failed to download from YouTube Music"
-            return result
-        
-        # Step 3: Extract audio features
-        features_dict = extract_features_from_audio_file(audio_path)
-        result["audio_features"] = features_dict
-        
-        logger.info(f"Successfully processed {title} by {artist}")
-        return result
         
     except Exception as e:
         logger.error(f"Error in get_audio_features_simple: {str(e)}")
         return {
             "title": title,
             "artist": artist,
-            "youtube_music_url": None,
-            "video_id": None,
-            "duration": None,
+            "youtube_music_url": download_result["youtube_music_url"] if download_result else None,
+            "video_id": download_result["video_id"] if download_result else None,
+            "duration": download_result["duration"] if download_result else None,
             "audio_features": None,
             "error": str(e)
         }
     
     finally:
-        if temp_dir and os.path.exists(temp_dir):
+        # Cleanup temporary directory
+        if download_result and download_result.get("temp_dir") and os.path.exists(download_result["temp_dir"]):
             try:
-                shutil.rmtree(temp_dir)
+                shutil.rmtree(download_result["temp_dir"])
+                logger.debug(f"Cleaned up temp directory: {download_result['temp_dir']}")
             except Exception as cleanup_error:
                 logger.warning(f"Error cleaning up: {cleanup_error}")
 
@@ -411,22 +272,71 @@ async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
     
     return results
 
-@audio_feature_router.post("/simple_analyze")
-async def simple_analyze(title: str, artist: str):
+@audio_feature_router.get("/download")
+def download_song(title: str, artist: str):
     """
-    Simple endpoint: just input title and artist, get audio features
-    Downloads from YouTube Music automatically
+    Your original download endpoint - just downloads without feature extraction
     """
     try:
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            executor,
-            get_audio_features_simple,
-            title,
-            artist
-        )
+        # 1. Search on YouTube Music
+        results = ytmusic.search(query=f"{title} {artist}", filter="songs")
+        if not results:
+            raise HTTPException(status_code=404, detail="Song not found on YouTube Music")
+        
+        song = results[0]
+        video_id = song["videoId"]
+        duration = song["duration"]
+        yt_url = f"https://music.youtube.com/watch?v={video_id}"
+        
+        # 2. Prepare download directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
+            
+            # 3. Run yt-dlp to download audio
+            result = subprocess.run(
+                [
+                    "yt-dlp",
+                    "-x", "--audio-format", "mp3",
+                    "--output", output_path,
+                    f"https://www.youtube.com/watch?v={video_id}"
+                ],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode != 0:
+                raise HTTPException(status_code=500, detail=f"yt-dlp error: {result.stderr}")
+            
+            # 4. Return basic info
+            return {
+                "title": title,
+                "artist": artist,
+                "youtube_music_url": yt_url,
+                "video_id": video_id,
+                "duration": duration,
+                "audio_path": output_path,
+                "audio_features": None  # You can extract using librosa later
+            }
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download from YouTube Music: {str(e)}")
+
+@audio_feature_router.get("/simple_analyze")
+def simple_analyze(title: str, artist: str):
+    """
+    Simple endpoint: just input title and artist, get audio features
+    Downloads from YouTube Music using your exact pattern
+    """
+    try:
+        result = get_audio_features_simple(title, artist)
+        
+        if result["error"]:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
         return result
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in simple_analyze: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -437,13 +347,6 @@ async def analyze_audio_features(batch: TrackBatch):
     try:
         all_results = []
         total_tracks = len(batch.tracks)
-        
-        # Check dependencies
-        deps = check_dependencies()
-        if not deps['yt-dlp']:
-            raise HTTPException(status_code=500, detail="yt-dlp is not available")
-        if not deps['ytmusicapi']:
-            raise HTTPException(status_code=500, detail="ytmusicapi is not available")
         
         # Process tracks in batches of 3
         for i in range(0, total_tracks, 3):
@@ -484,12 +387,16 @@ async def analyze_single_track(track: TrackRequest):
         raise HTTPException(status_code=500, detail=f"Single track processing failed: {str(e)}")
 
 @audio_feature_router.get("/health")
-async def health_check():
+def health_check():
     """Health check endpoint"""
-    deps = check_dependencies()
     return {
-        "status": "healthy" if all([deps['yt-dlp'], deps['ytmusicapi']]) else "degraded",
+        "status": "healthy",
         "service": "audio_feature_analyzer",
-        "dependencies": deps,
-        "source": "YouTube Music"
+        "source": "YouTube Music",
+        "endpoints": [
+            "/download - Download only (your original code)",
+            "/simple_analyze - Download + extract features", 
+            "/analyze - Batch processing",
+            "/analyze_single - Single track processing"
+        ]
     }

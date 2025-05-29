@@ -70,7 +70,7 @@ async def generate_story_with_openai(lyrics: str, customize: Optional[str] = Non
             max_tokens=800,
             temperature=0.9,
         )
-        return response["choices"][0]["message"]["content"].strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error from OpenAI: {str(e)}")
 

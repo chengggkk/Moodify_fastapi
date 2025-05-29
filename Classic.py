@@ -272,12 +272,15 @@ async def recommend_music(request: MusicPrompt):
     try:
         # Step 1: Analyze prompt and generate search query
         search_query = await music_service.analyze_prompt_with_mistral(request.prompt)
+        print(search_query)
         
         # Step 2: Search with Brave API and get URLs
         search_results, urls = await music_service.search_with_brave(search_query)
+        print(search_results, urls)
         
         # Step 2.5: Extract HTML content from search result URLs
         html_content = await music_service.extract_music_info_from_html(urls)
+        print(html_content)
         
         # Step 3: Generate song recommendations with OpenAI using search results and HTML content
         songs = await music_service.generate_songs_with_openai(request.prompt, search_results, html_content)

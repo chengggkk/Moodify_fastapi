@@ -43,35 +43,85 @@ class MusicRecommendationService:
         self.client = httpx.AsyncClient(timeout=30.0)
         self.executor = ThreadPoolExecutor(max_workers=5)
     
+    def detect_language_and_count(self, user_prompt: str) -> tuple[str, int]:
+        """Detect language preference and song count from user prompt"""
+        prompt_lower = user_prompt.lower()
+        
+        # Extract number of songs requested
+        song_count = 15  # default
+        
+        # Look for specific numbers
+        import re
+        numbers = re.findall(r'\b(\d+)\b', user_prompt)
+        if numbers:
+            try:
+                requested_count = int(numbers[0])
+                if 1 <= requested_count <= 50:  # reasonable limits
+                    song_count = requested_count
+            except:
+                pass
+        
+        # Detect language preference
+        language_indicators = {
+            'korean': ['k-drama', 'kdrama', '韓劇', '한드라마', 'korean', 'k-pop', 'kpop', '韓國', '한국'],
+            'chinese': ['c-pop', 'cpop', 'chinese', '中文', '華語', '中國', '台灣', 'mandarin', 'cantonese'],
+            'japanese': ['j-pop', 'jpop', 'japanese', '日本', '日語', 'anime', 'city pop'],
+            'english': ['english', 'american', 'british', 'uk', 'us']
+        }
+        
+        detected_language = 'english'  # default
+        for lang, indicators in language_indicators.items():
+            if any(indicator in prompt_lower for indicator in indicators):
+                detected_language = lang
+                break
+        
+        return detected_language, song_count
+    
     async def generate_search_queries_with_mistral(self, user_prompt: str) -> List[str]:
-        """Step 1: Generate multiple refined search queries using Mistral AI"""
+        """Step 1: Generate multiple refined search queries using Mistral AI with language detection"""
+        detected_language, song_count = self.detect_language_and_count(user_prompt)
+        
         headers = {
             "Authorization": f"Bearer {MISTRAL_API_KEY}",
             "Content-Type": "application/json"
         }
+        
+        # Enhanced system prompt with language-specific instructions
+        system_content = f"""You are a music search query generator. Given a user's music request, 
+        generate 3 different optimized search queries that would help find relevant songs.
+        
+        IMPORTANT: The user appears to prefer {detected_language} content and wants approximately {song_count} songs.
+        
+        Language-specific search strategies:
+        - Korean: Use both English and Korean terms (한국어). Include "K-drama OST", "K-pop", "한국 음악"
+        - Chinese: Use both English and Chinese terms (中文). Include "華語歌曲", "中文歌", "台灣音樂"  
+        - Japanese: Use both English and Japanese terms (日本語). Include "J-pop", "日本音楽", "アニメソング"
+        - English: Focus on English terms with genre and temporal specifications
+        
+        For each query, consider:
+        1. Native language terms when applicable
+        2. Genre-specific keywords  
+        3. Temporal/trending variations ("2024", "latest", "popular")
+        
+        Return ONLY a JSON array of 3 search query strings, nothing else.
+        
+        Examples:
+        Input: "recommend 10 taylor swift popular songs"
+        Output: ["taylor swift most popular songs", "taylor swift greatest hits top songs", "taylor swift best songs all time"]
+        
+        Input: "韓劇浪漫OST推薦"
+        Output: ["韓劇 로맨틱 OST 추천", "korean drama romantic soundtrack", "K-drama love songs OST"]
+        
+        Input: "中文流行歌曲"
+        Output: ["中文流行歌曲 華語", "chinese pop songs mandarin", "華語流行音樂 2024"]
+        """
         
         payload = {
             "model": "mistral-large-latest",
             "messages": [
                 {
                     "role": "system",
-                    "content": """You are a music search query generator. Given a user's music request, 
-                    generate 3 different optimized search queries that would help find relevant songs please use KEY WORDS to search.
-                    
-                    For each query, consider:
-                    1. General English search terms
-                    2. Native language terms (if applicable - Korean for K-drama, Chinese for C-pop, etc.)
-                    3. Trending/temporal variations (current year, "best of", "top 10", etc.)
-                    
-                    Return ONLY a JSON array of 3 search query strings, nothing else.
-                    
-                    Examples:
-                    Input: "give me K-drama romantic OST"
-                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST this year"]
-                    
-                    Input: "taylor swift TTPD tracks"
-                    Output: ["taylor swift TTPD", "taylor swift THE TORTURED POETS DEPARTMENT", "taylor swift new album tracks"]
-                    """
+                    "content": system_content
                 },
                 {
                     "role": "user",
@@ -94,27 +144,38 @@ class MusicRecommendationService:
             
         except Exception as e:
             print(f"Mistral query generation error: {e}")
-            # Fallback: create basic variations manually
-            return self.create_fallback_queries(user_prompt)
+            # Fallback: create language-aware variations manually
+            return self.create_fallback_queries(user_prompt, detected_language)
     
-    def create_fallback_queries(self, prompt: str) -> List[str]:
-        """Create fallback search queries when Mistral fails"""
+    def create_fallback_queries(self, prompt: str, detected_language: str) -> List[str]:
+        """Create fallback search queries with language awareness"""
         base_query = prompt.lower()
         
-        # Generate variations
-        queries = [
-            prompt,
-            f"best {prompt}",
-            f"top {prompt} songs"
-        ]
-        
-        # Add language-specific variations
-        if "k-drama" in base_query or "korean" in base_query:
-            queries[2] = f"{prompt} 한국"
-        elif "chinese" in base_query or "c-pop" in base_query:
-            queries[2] = f"{prompt} 中文"
-        elif "japanese" in base_query or "j-pop" in base_query:
-            queries[2] = f"{prompt} 日本"
+        # Language-specific query variations
+        if detected_language == 'korean':
+            queries = [
+                prompt,
+                f"{prompt} 한국",
+                f"korean {prompt.replace('韓劇', 'k-drama').replace('韓國', 'korean')}"
+            ]
+        elif detected_language == 'chinese':
+            queries = [
+                prompt,
+                f"{prompt} 中文",
+                f"chinese {prompt.replace('中文', 'mandarin')}"
+            ]
+        elif detected_language == 'japanese':
+            queries = [
+                prompt,
+                f"{prompt} 日本",
+                f"japanese {prompt}"
+            ]
+        else:  # English or default
+            queries = [
+                prompt,
+                f"best {prompt}",
+                f"top {prompt} songs"
+            ]
         
         return queries
     
@@ -128,13 +189,13 @@ class MusicRecommendationService:
         
         params = {
             "q": query,
-            "count": 5,  # Increased from 8 to 15
+            "count": 8,  # Balanced count
             "safesearch": "moderate",
             "freshness": "pw"  # Past week for more recent results
         }
         
         try:
-            response = requests.get(BRAVE_SEARCH_URL, headers=headers, params=params, timeout=10)
+            response = requests.get(BRAVE_SEARCH_URL, headers=headers, params=params, timeout=15)
             response.raise_for_status()
             search_results = response.json()
             results = search_results.get("web", {}).get("results", [])
@@ -178,7 +239,7 @@ class MusicRecommendationService:
                 unique_urls.append(url)
                 seen_urls.add(url)
         
-        return all_results, unique_urls[:5] 
+        return all_results, unique_urls[:6]  # Reduced to prevent timeout
     
     async def extract_html_content(self, url: str) -> str:
         """Extract and clean HTML content using BeautifulSoup"""
@@ -204,8 +265,8 @@ class MusicRecommendationService:
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = ' '.join(chunk for chunk in chunks if chunk)
             
-            # Limit text length
-            return text[:2000] if len(text) > 2000 else text
+            # Limit text length to prevent token overflow
+            return text[:1500] if len(text) > 1500 else text
             
         except Exception as e:
             print(f"HTML extraction error for {url}: {e}")
@@ -213,17 +274,18 @@ class MusicRecommendationService:
     
     async def extract_music_info_from_html(self, urls: List[str]) -> str:
         """Extract music-related information from multiple URLs"""
-        # Process first 8 URLs concurrently for speed (increased from 5)
+        # Process fewer URLs to prevent timeout
         extraction_tasks = [
             self.extract_html_content(url) 
-            for url in urls[:8]
+            for url in urls[:4]  # Reduced from 8 to 4
         ]
         
         contents = await asyncio.gather(*extraction_tasks, return_exceptions=True)
         
         extracted_content = []
         music_keywords = ['song', 'artist', 'album', 'music', 'track', 'singer', 'band', 'OST', 'soundtrack', 
-                         'lyrics', 'discography', 'release', 'spotify', 'apple music', 'playlist', 'chart']
+                         'lyrics', 'discography', 'release', 'spotify', 'apple music', 'playlist', 'chart',
+                         '歌曲', '歌手', '專輯', '音樂', '歌詞', '원곡', '가수', '앨범', '음악']
         
         for content in contents:
             if isinstance(content, str) and content:
@@ -231,53 +293,65 @@ class MusicRecommendationService:
                 if any(keyword in content_lower for keyword in music_keywords):
                     extracted_content.append(content)
         
-        return "\n\n".join(extracted_content)
+        combined_content = "\n\n".join(extracted_content)
+        # Limit total content to prevent token overflow
+        return combined_content[:2500] if len(combined_content) > 2500 else combined_content
     
     async def generate_songs_with_openai(self, user_prompt: str, search_results: List[Dict], html_content: str, queries_used: List[str]) -> List[Song]:
-        """Step 3: Analyze search results and HTML content to generate song recommendations using OpenAI"""
+        """Step 3: Generate song recommendations with language and count awareness"""
+        detected_language, requested_count = self.detect_language_and_count(user_prompt)
+        
         headers = {
             "Authorization": f"Bearer {OPENAI_API_KEY}",
             "Content-Type": "application/json"
         }
         
-        # Prepare search context from multiple query results
+        # Prepare search context - limit to prevent token overflow
         search_context = f"Search queries used: {', '.join(queries_used)}\n\n"
-        for i, result in enumerate(search_results[:15]):  # Increased from 10 to 15 results
-            search_context += f"Result {i+1}:\nTitle: {result.get('title', '')}\nSnippet: {result.get('description', '')}\nURL: {result.get('url', '')}\n\n"
+        for i, result in enumerate(search_results[:10]):  # Reduced to 10 results
+            search_context += f"Result {i+1}:\nTitle: {result.get('title', '')}\nSnippet: {result.get('description', '')}\n\n"
         
         # Add HTML content if available
         html_section = ""
         if html_content:
-            html_section = f"\nExtracted Website Content:\n{html_content[:3000]}\n"  # Increased from 2000 to 3000 chars
+            html_section = f"\nExtracted Website Content:\n{html_content}\n"
         
-        system_prompt = f"""You are a music recommendation expert. Based on the user's request, multiple search results 
-        from different refined queries, and extracted website content, recommend songs that match their criteria.
+        # Enhanced system prompt with language preservation
+        system_prompt = f"""You are a music recommendation expert. Based on the user's request, search results, and website content, recommend exactly {requested_count} songs.
 
-        IMPORTANT:
-        - 1.if user has limit of amount of songs, ONLY return the amount of the songs, if no specific request, return 10~20 tracks.
-        - 2.if user has specific artist request, ONLY return the artist's tracks.
-        - 3.if user has specific publish year request, ONLY return the tracks of the year.
-        - 4.if user has specific language request, ONLY return the tracks in that language.
+        CRITICAL REQUIREMENTS:
+        1. Return EXACTLY {requested_count} songs (not more, not less)
+        2. Primary language preference: {detected_language}
+        3. Keep original song titles and artist names in their native language/script
+        4. For Korean songs: Use 한글 (Hangul) for Korean titles/artists
+        5. For Chinese songs: Use 中文 (Chinese characters) for Chinese titles/artists  
+        6. For Japanese songs: Use 日本語 (Japanese) for Japanese titles/artists
+        7. Only include English translations in parentheses if specifically requested
         
-        Use the diverse search results and website content to find actual song titles and artists. 
-        The search was performed using multiple optimized queries to ensure comprehensive coverage.
+        Language-specific instructions:
+        - Korean: Preserve 한글 titles like "봄날", "You Are My Everything" 
+        - Chinese: Preserve 中文 titles like "月亮代表我的心", "聽海"
+        - Japanese: Preserve titles like "桜", "Jupiter"
+        - English: Use standard English titles
         
-        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields (required), 
-        and optionally 'album' and 'publish_year' fields. Do not include any additional text or formatting.
+        Return ONLY a valid JSON array with exactly {requested_count} objects containing 'title' and 'artist' fields (required), 
+        and optionally 'album' and 'publish_year' fields. No additional text or formatting.
         
-        Example format:
+        Example format for Korean:
         [
-            {"title": "Original Language of the Song Name", "artist": "Original Language of the Artist Name", "album": "Album Name", "publish_year": 2020},
-            {"title": "Another Song", "artist": "Another Artist", "album": "Album Name", "publish_year": 2020}
+            {{"title": "봄날", "artist": "BTS", "album": "You Never Walk Alone", "publish_year": 2017}},
+            {{"title": "You Are My Everything", "artist": "Gummy", "album": "Goblin OST", "publish_year": 2016}}
         ]"""
         
         user_message = f"""User Request: {user_prompt}
 
+Language Preference: {detected_language}
+Requested Count: {requested_count} songs
+
 {search_context}
 {html_section}
 
-Based on the user's request and the comprehensive search results from multiple optimized queries, 
-generate a diverse playlist that aligns with the user's prompt in the specified JSON format."""
+Generate exactly {requested_count} songs in {detected_language} preference, preserving original language titles and artist names."""
         
         payload = {
             "model": "gpt-4o-mini",
@@ -285,8 +359,8 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
-            "max_tokens": 1500,
-            "temperature": 0.7
+            "max_tokens": 2000,  # Increased for more songs
+            "temperature": 0.6
         }
         
         try:
@@ -299,74 +373,99 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
             # Parse JSON response
             songs_data = json.loads(content)
             
-            # Create Song objects with proper error handling for missing fields
+            # Ensure we have exactly the requested number of songs
+            if len(songs_data) > requested_count:
+                songs_data = songs_data[:requested_count]
+            elif len(songs_data) < requested_count:
+                # Pad with fallback songs if needed
+                fallback_songs = self.create_fallback_songs(user_prompt, detected_language)
+                while len(songs_data) < requested_count and fallback_songs:
+                    songs_data.append(fallback_songs.pop(0).__dict__)
+            
+            # Create Song objects
             songs = []
             for song in songs_data:
                 try:
                     song_obj = Song(
                         title=song.get("title", "Unknown Title"),
                         artist=song.get("artist", "Unknown Artist"),
-                        album=song.get("album"),  # This will be None if not present
-                        publish_year=song.get("publish_year")  # This will be None if not present
+                        album=song.get("album"),
+                        publish_year=song.get("publish_year")
                     )
                     songs.append(song_obj)
                 except Exception as e:
                     print(f"Error creating song object: {e}, song data: {song}")
-                    # Create a minimal song object if there's an error
                     songs.append(Song(
                         title=str(song.get("title", "Unknown Title")),
                         artist=str(song.get("artist", "Unknown Artist"))
                     ))
             
-            return songs
+            return songs[:requested_count]  # Ensure exact count
             
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}")
             print(f"Response content: {content}")
-            # Fallback: create default songs based on prompt keywords
-            return self.create_fallback_songs(user_prompt)
+            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
         except Exception as e:
             print(f"OpenAI generation error: {e}")
-            return self.create_fallback_songs(user_prompt)
+            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
     
-    def create_fallback_songs(self, prompt: str) -> List[Song]:
-        """Create fallback songs when AI services fail"""
+    def create_fallback_songs(self, prompt: str, detected_language: str) -> List[Song]:
+        """Create language-appropriate fallback songs"""
         fallback_songs = {
-            "k-drama": [
-                Song(title="You Are My Everything", artist="Gummy", album="Goblin OST", publish_year=2016),
-                Song(title="Always", artist="Yoon Mirae", album="Descendants of the Sun OST", publish_year=2016),
-                Song(title="Stay With Me", artist="Chanyeol & Punch", album="Goblin OST", publish_year=2016),
-                Song(title="Breath", artist="Lee Hi", album="It's Okay to Not Be Okay OST", publish_year=2020),
-                Song(title="Spring Day", artist="BTS", album="You Never Walk Alone", publish_year=2017)
-            ],
-            "taylor swift": [
-                Song(title="All Too Well", artist="Taylor Swift", album="Red", publish_year=2012),
-                Song(title="Ronan", artist="Taylor Swift", album="Single", publish_year=2012),
-                Song(title="Soon You'll Get Better", artist="Taylor Swift", album="Lover", publish_year=2019),
-                Song(title="Death by a Thousand Cuts", artist="Taylor Swift", album="Lover", publish_year=2019),
-                Song(title="Sad Beautiful Tragic", artist="Taylor Swift", album="Red", publish_year=2012)
+            "korean": [
+                Song(title="봄날", artist="BTS", album="You Never Walk Alone", publish_year=2017),
+                Song(title="You Are My Everything", artist="Gummy", album="도깨비 OST", publish_year=2016),
+                Song(title="Stay With Me", artist="찬열 & 펀치", album="도깨비 OST", publish_year=2016),
+                Song(title="숨", artist="이하이", album="사이코지만 괜찮아 OST", publish_year=2020),
+                Song(title="시간을 거슬러", artist="린", album="달의 연인 - 보보경심 려 OST", publish_year=2016),
+                Song(title="나를 잊지마요", artist="크러쉬", album="도깨비 OST", publish_year=2016),
+                Song(title="Love Yourself", artist="BTS", album="Love Yourself 承 'Her'", publish_year=2017),
+                Song(title="밤편지", artist="아이유", album="Through the Night", publish_year=2017),
+                Song(title="DNA", artist="BTS", album="Love Yourself 承 'Her'", publish_year=2017),
+                Song(title="첫눈처럼 너에게 가겠다", artist="에일리", album="도깨비 OST", publish_year=2016)
             ],
             "chinese": [
-                Song(title="月亮代表我的心", artist="Teresa Teng", album="島國之情歌第五集", publish_year=1977),
-                Song(title="童话", artist="Guang Liang", album="童話", publish_year=2005),
-                Song(title="听海", artist="A-Mei", album="Bad Boy", publish_year=1997),
-                Song(title="小幸运", artist="Hebe Tien", album="我的少女時代 電影原聲帶", publish_year=2015),
-                Song(title="演员", artist="Xue Zhiqian", album="紳士", publish_year=2015)
+                Song(title="月亮代表我的心", artist="鄧麗君", album="島國之情歌第五集", publish_year=1977),
+                Song(title="童话", artist="光良", album="童話", publish_year=2005),
+                Song(title="聽海", artist="張惠妹", album="Bad Boy", publish_year=1997),
+                Song(title="小幸運", artist="田馥甄", album="我的少女時代 電影原聲帶", publish_year=2015),
+                Song(title="演員", artist="薛之謙", album="紳士", publish_year=2015),
+                Song(title="匆匆那年", artist="王菲", album="匆匆那年 電影原聲帶", publish_year=2014),
+                Song(title="告白氣球", artist="周杰倫", album="周杰倫的床邊故事", publish_year=2016),
+                Song(title="晴天", artist="周杰倫", album="葉惠美", publish_year=2003),
+                Song(title="夜曲", artist="周杰倫", album="十一月的蕭邦", publish_year=2005),
+                Song(title="紅豆", artist="王菲", album="唱遊", publish_year=1998)
+            ],
+            "japanese": [
+                Song(title="桜", artist="コブクロ", album="CALLING", publish_year=2005),
+                Song(title="Jupiter", artist="平原綾香", album="Jupiter", publish_year=2003),
+                Song(title="恋", artist="星野源", album="恋", publish_year=2016),
+                Song(title="津軽海峡冬景色", artist="石川さゆり", album="津軽海峡冬景色", publish_year=1977),
+                Song(title="千の風になって", artist="秋川雅史", album="千の風になって", publish_year=2006),
+                Song(title="贈る言葉", artist="海援隊", album="贈る言葉", publish_year=1979),
+                Song(title="Summer", artist="久石譲", album="菊次郎の夏 サウンドトラック", publish_year=1999),
+                Song(title="First Love", artist="宇多田ヒカル", album="First Love", publish_year=1999),
+                Song(title="涙そうそう", artist="夏川りみ", album="涙そうそう", publish_year=2001),
+                Song(title="HANABI", artist="Mr.Children", album="HOME", publish_year=2007)
             ]
         }
         
-        prompt_lower = prompt.lower()
-        for key, songs in fallback_songs.items():
-            if key in prompt_lower:
-                return songs
+        if detected_language in fallback_songs:
+            return fallback_songs[detected_language]
         
-        # Default fallback
+        # Default English fallback
         return [
             Song(title="Shape of You", artist="Ed Sheeran", album="÷", publish_year=2017),
             Song(title="Blinding Lights", artist="The Weeknd", album="After Hours", publish_year=2020),
             Song(title="Watermelon Sugar", artist="Harry Styles", album="Fine Line", publish_year=2020),
             Song(title="Good 4 U", artist="Olivia Rodrigo", album="SOUR", publish_year=2021),
-            Song(title="Levitating", artist="Dua Lipa", album="Future Nostalgia", publish_year=2020)
+            Song(title="Levitating", artist="Dua Lipa", album="Future Nostalgia", publish_year=2020),
+            Song(title="Anti-Hero", artist="Taylor Swift", album="Midnights", publish_year=2022),
+            Song(title="As It Was", artist="Harry Styles", album="Harry's House", publish_year=2022),
+            Song(title="Heat Waves", artist="Glass Animals", album="Dreamland", publish_year=2020),
+            Song(title="Stay", artist="The Kid LAROI & Justin Bieber", album="F*ck Love 3: Over You", publish_year=2021),
+            Song(title="Bad Habit", artist="Steve Lacy", album="Gemini Rights", publish_year=2022)
         ]
     
     async def close(self):
@@ -379,36 +478,43 @@ music_service = MusicRecommendationService()
 @music_router.post("/recommend", response_model=MusicResponse)
 async def recommend_music(request: MusicPrompt):
     """
-    Enhanced music recommendation endpoint
+    Enhanced music recommendation endpoint with language detection and count limits
     
     Process:
-    1. Generate multiple refined search queries using Mistral AI
-    2. Search all queries synchronously using ThreadPoolExecutor for speed
-    3. Extract HTML content from search result URLs using BeautifulSoup
-    4. Analyze combined results to generate recommendations with OpenAI
+    1. Detect language preference and song count from user prompt
+    2. Generate multiple refined search queries using Mistral AI with language awareness
+    3. Search all queries with optimized performance 
+    4. Extract HTML content from search result URLs
+    5. Generate exact number of recommendations with language preservation using OpenAI
     
-    Returns JSON formatted song list with title and artist
+    Returns JSON formatted song list with exact count and original language titles
     """
     try:
-        # Step 1: Generate multiple refined search queries with Mistral
+        # Step 0: Detect language and count preferences
+        detected_language, song_count = music_service.detect_language_and_count(request.prompt)
+        print(f"Detected language: {detected_language}, requested count: {song_count}")
+        
+        # Step 1: Generate language-aware search queries with Mistral
         search_queries = await music_service.generate_search_queries_with_mistral(request.prompt)
         print(f"Generated queries: {search_queries}")
         
-        # Step 2: Search all queries synchronously for better performance
+        # Step 2: Search all queries with timeout protection
         search_results, urls = await music_service.search_multiple_queries_sync(search_queries)
         print(f"Found {len(search_results)} results from {len(urls)} URLs")
         
-        # Step 2.5: Extract HTML content from search result URLs
+        # Step 2.5: Extract HTML content with limits to prevent timeouts
         html_content = await music_service.extract_music_info_from_html(urls)
         print(f"Extracted {len(html_content)} characters of HTML content")
         
-        # Step 3: Generate song recommendations with OpenAI using all search results and HTML content
+        # Step 3: Generate exact count of recommendations with language preservation
         songs = await music_service.generate_songs_with_openai(
             request.prompt, 
             search_results, 
             html_content, 
             search_queries
         )
+        
+        print(f"Generated {len(songs)} songs")
         
         return MusicResponse(
             songs=songs,
@@ -417,6 +523,7 @@ async def recommend_music(request: MusicPrompt):
         )
         
     except Exception as e:
+        print(f"Error in recommend_music: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 @music_router.get("/health")
@@ -429,43 +536,34 @@ async def shutdown_event():
     """Cleanup on shutdown"""
     await music_service.close()
 
-# Example usage endpoints for testing
+# Enhanced example endpoints
 @music_router.get("/examples")
 async def get_examples():
-    """Get example prompts for testing"""
+    """Get example prompts for testing with language awareness"""
     return {
         "examples": [
-            "give me some K-drama romantic OST",
-            "recommend taylor swift sad songs", 
-            "2004 Chinese tracks",
-            "upbeat workout songs",
-            "jazz classics from the 1960s",
+            "recommend 10 taylor swift popular songs",
+            "give me 5 K-drama romantic OST",
+            "推薦15首中文流行歌曲", 
+            "韓劇浪漫OST推薦8首",
+            "20 upbeat workout songs",
+            "5 jazz classics from the 1960s",
             "indie folk songs for rainy days",
-            "latest K-pop hits",
-            "emotional Chinese ballads",
-            "Japanese city pop"
+            "latest 12 K-pop hits",
+            "10 emotional Chinese ballads",
+            "Japanese city pop 推薦7首"
         ]
     }
 
-# Test endpoint to see query generation
+# Test endpoint to see language detection and query generation
 @music_router.post("/test-queries")
 async def test_query_generation(request: MusicPrompt):
-    """Test endpoint to see what queries are generated for a prompt"""
+    """Test endpoint to see language detection and query generation"""
+    detected_language, song_count = music_service.detect_language_and_count(request.prompt)
     queries = await music_service.generate_search_queries_with_mistral(request.prompt)
-    return {"original_prompt": request.prompt, "generated_queries": queries}
-
-# Example of how to use this router in main app:
-"""
-from fastapi import FastAPI
-from this_router_file import music_router
-
-app = FastAPI(title="Enhanced Music Recommendation API", version="2.0.0")
-app.include_router(music_router)
-
-# Required dependencies:
-# pip install fastapi uvicorn httpx pydantic beautifulsoup4 requests
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-"""
+    return {
+        "original_prompt": request.prompt,
+        "detected_language": detected_language,
+        "requested_song_count": song_count,
+        "generated_queries": queries
+    }

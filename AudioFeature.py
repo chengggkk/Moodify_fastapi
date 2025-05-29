@@ -1,9 +1,8 @@
 # audio_feature_router.py
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import asyncio
-import aiohttp
 import subprocess
 import librosa
 import numpy as np
@@ -14,16 +13,24 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import glob
 import shutil
+from ytmusicapi import YTMusic
+import requests
+import base64
 
 
 logger = logging.getLogger(__name__)
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
 
+# Initialize YTMusic for metadata only
+ytmusic = YTMusic()
+
 # Pydantic models
 class TrackRequest(BaseModel):
     title: str
     artist: str
+    audio_url: Optional[str] = None  # Direct audio URL if available
+    audio_base64: Optional[str] = None  # Base64 encoded audio data
 
 class TrackBatch(BaseModel):
     tracks: List[TrackRequest]
@@ -41,7 +48,7 @@ class AudioFeatures(BaseModel):
 class TrackResult(BaseModel):
     title: str
     artist: str
-    youtube_url: Optional[str]
+    metadata: Optional[Dict] = None  # Track metadata from YouTube Music
     audio_features: Optional[AudioFeatures]
     error: Optional[str]
 
@@ -51,245 +58,133 @@ class BatchResponse(BaseModel):
     successful: int
     failed: int
 
-# Configuration
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
-
 # Thread pool for CPU-intensive audio processing
 executor = ThreadPoolExecutor(max_workers=3)
 
 def check_dependencies():
     """Check if required dependencies are available"""
     dependencies = {
-        'yt-dlp': False,
-        'ffmpeg': False
+        'librosa': False,
+        'ytmusicapi': False,
+        'requests': False
     }
     
     try:
-        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
-        dependencies['yt-dlp'] = True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("yt-dlp not found or not working")
+        import librosa
+        dependencies['librosa'] = True
+    except ImportError:
+        logger.warning("librosa not found")
     
     try:
-        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
-        dependencies['ffmpeg'] = True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logger.warning("ffmpeg not found or not working")
+        ytmusic.search("test", filter="songs", limit=1)
+        dependencies['ytmusicapi'] = True
+    except Exception as e:
+        logger.warning(f"ytmusicapi not working: {e}")
+    
+    try:
+        import requests
+        dependencies['requests'] = True
+    except ImportError:
+        logger.warning("requests not found")
     
     logger.info(f"Dependencies check: {dependencies}")
     return dependencies
 
-async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist: str) -> Optional[str]:
-    """Search for YouTube URL using Brave Search API"""
+def get_track_metadata(title: str, artist: str) -> Optional[Dict]:
+    """Get track metadata using YouTube Music API (metadata only, no download)"""
     try:
-        query = f"{title} {artist} site:youtube.com"
+        query = f"{title} {artist}"
+        logger.info(f"Getting metadata for: {query}")
+        
+        results = ytmusic.search(query, filter="songs", limit=5)
+        
+        if not results:
+            logger.warning(f"No metadata found for: {query}")
+            return None
+        
+        # Find the best match
+        best_match = None
+        for result in results:
+            try:
+                result_title = result.get('title', '').lower()
+                result_artists = [artist['name'].lower() for artist in result.get('artists', [])]
+                
+                title_match = title.lower() in result_title or result_title in title.lower()
+                artist_match = any(artist.lower() in ra or ra in artist.lower() for ra in result_artists)
+                
+                if title_match and artist_match:
+                    best_match = result
+                    break
+                elif title_match or artist_match:
+                    if not best_match:
+                        best_match = result
+            except Exception as e:
+                logger.warning(f"Error processing search result: {e}")
+                continue
+        
+        if not best_match:
+            best_match = results[0]
+        
+        metadata = {
+            'title': best_match.get('title', title),
+            'artists': [artist['name'] for artist in best_match.get('artists', [])],
+            'album': best_match.get('album', {}).get('name', 'Unknown') if best_match.get('album') else 'Unknown',
+            'duration': best_match.get('duration', 'Unknown'),
+            'year': best_match.get('year', 'Unknown'),
+            'thumbnails': best_match.get('thumbnails', []),
+            'video_id': best_match.get('videoId', '')
+        }
+        
+        logger.info(f"Found metadata: {metadata['title']} by {', '.join(metadata['artists'])}")
+        return metadata
+        
+    except Exception as e:
+        logger.error(f"Error getting metadata for {title} by {artist}: {str(e)}")
+        return None
+
+def download_audio_from_url(audio_url: str, output_path: str) -> bool:
+    """Download audio from a direct URL"""
+    try:
+        logger.info(f"Downloading audio from URL: {audio_url}")
         
         headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "X-Subscription-Token": BRAVE_API_KEY
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        params = {
-            "q": query,
-            "count": 3,
-            "search_lang": "en",
-            "country": "US",
-            "safesearch": "moderate",
-            "freshness": "all"
-        }
+        response = requests.get(audio_url, headers=headers, stream=True, timeout=30)
+        response.raise_for_status()
         
-        async with session.get(BRAVE_SEARCH_URL, headers=headers, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                
-                # Look for YouTube URLs in search results
-                if "web" in data and "results" in data["web"]:
-                    for result in data["web"]["results"]:
-                        url = result.get("url", "")
-                        if "youtube.com/watch" in url or "youtu.be/" in url:
-                            logger.info(f"Found YouTube URL for {title} by {artist}: {url}")
-                            return url
-                
-                logger.warning(f"No YouTube URL found for {title} by {artist}")
-                return None
-            else:
-                logger.error(f"Brave Search API error: {response.status}")
-                return None
-                
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        logger.info(f"Successfully downloaded to: {output_path}")
+        return True
+        
     except Exception as e:
-        logger.error(f"Error searching for {title} by {artist}: {str(e)}")
-        return None
+        logger.error(f"Error downloading from URL {audio_url}: {str(e)}")
+        return False
 
-def download_with_cookies_from_browser(youtube_url: str, output_dir: str, browser: str = "chrome") -> Optional[str]:
-    """Download using cookies extracted directly from browser"""
+def save_base64_audio(audio_base64: str, output_path: str) -> bool:
+    """Save base64 encoded audio to file"""
     try:
-        command = [
-            "yt-dlp",
-            "--cookies", "cookies.txt",
-            "-x", "--audio-format", "mp3",
-            "--audio-quality", "0",  # Best quality
-            "--output", f"{output_dir}/%(title)s.%(ext)s",
-            "--ffmpeg-location", shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
-            "--prefer-ffmpeg",
-            "--no-warnings",
-            youtube_url
-        ]
+        logger.info("Saving base64 audio data")
         
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        # Remove data URL prefix if present
+        if audio_base64.startswith('data:'):
+            audio_base64 = audio_base64.split(',')[1]
         
-        if result.returncode == 0:
-            logger.info(f"Successfully downloaded with {browser} cookies: {youtube_url}")
-            return find_audio_file(output_dir)
-        else:
-            logger.warning(f"Failed to download with {browser} cookies: {result.stderr}")
-            return None
-            
-    except subprocess.TimeoutExpired:
-        logger.error(f"Download timeout for {youtube_url}")
-        return None
+        audio_data = base64.b64decode(audio_base64)
+        
+        with open(output_path, 'wb') as f:
+            f.write(audio_data)
+        
+        logger.info(f"Successfully saved base64 audio to: {output_path}")
+        return True
+        
     except Exception as e:
-        logger.error(f"Error downloading with {browser} cookies: {str(e)}")
-        return None
-
-def download_without_cookies(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Download without cookies using various user agents and methods"""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    ]
-    
-    for i, user_agent in enumerate(user_agents):
-        try:
-            command = [
-                "yt-dlp",
-                "--user-agent", user_agent,
-                "-x", "--audio-format", "mp3",
-                "--audio-quality", "0",
-                "--output", f"{output_dir}/%(title)s.%(ext)s",
-                "--ffmpeg-location", shutil.which("ffmpeg") or "/usr/bin/ffmpeg",
-                "--prefer-ffmpeg",
-                "--no-warnings",
-                "--extractor-retries", "3",
-                "--fragment-retries", "3",
-                youtube_url
-            ]
-            
-            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-            
-            if result.returncode == 0:
-                logger.info(f"Successfully downloaded without cookies (attempt {i+1}): {youtube_url}")
-                return find_audio_file(output_dir)
-            else:
-                logger.warning(f"Attempt {i+1} failed: {result.stderr}")
-                
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Timeout on attempt {i+1} for {youtube_url}")
-            continue
-        except Exception as e:
-            logger.warning(f"Attempt {i+1} error: {str(e)}")
-            continue
-    
-    return None
-
-def download_best_audio_only(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Download best audio without conversion, then convert manually with ffmpeg"""
-    try:
-        # First, download the best audio format available
-        command = [
-            "yt-dlp",
-            "-f", "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
-            "--output", f"{output_dir}/%(title)s.%(ext)s",
-            "--no-warnings",
-            "--extractor-retries", "5",
-            youtube_url
-        ]
-        
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
-        
-        if result.returncode != 0:
-            logger.error(f"Failed to download audio: {result.stderr}")
-            return None
-        
-        # Find the downloaded file
-        audio_file = find_audio_file(output_dir)
-        if not audio_file:
-            return None
-        
-        # Convert to MP3 using ffmpeg directly
-        output_mp3 = os.path.join(output_dir, "converted_audio.mp3")
-        ffmpeg_command = [
-            "ffmpeg",
-            "-i", audio_file,
-            "-acodec", "libmp3lame",
-            "-ab", "192k",
-            "-ar", "44100",
-            "-y",  # Overwrite output file
-            output_mp3
-        ]
-        
-        ffmpeg_result = subprocess.run(ffmpeg_command, capture_output=True, text=True, timeout=60)
-        
-        if ffmpeg_result.returncode == 0 and os.path.exists(output_mp3):
-            logger.info(f"Successfully converted to MP3: {output_mp3}")
-            # Remove original file to save space
-            try:
-                os.remove(audio_file)
-            except:
-                pass
-            return output_mp3
-        else:
-            logger.warning(f"FFmpeg conversion failed, using original file: {audio_file}")
-            return audio_file
-            
-    except subprocess.TimeoutExpired:
-        logger.error(f"Download timeout for {youtube_url}")
-        return None
-    except Exception as e:
-        logger.error(f"Error in best audio download: {str(e)}")
-        return None
-
-def find_audio_file(directory: str) -> Optional[str]:
-    """Find any audio file in the directory"""
-    audio_extensions = ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg", "*.aac"]
-    
-    for ext in audio_extensions:
-        files = glob.glob(os.path.join(directory, ext))
-        if files:
-            return files[0]
-    
-    return None
-
-def download_audio_comprehensive(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Comprehensive download strategy with multiple fallbacks"""
-    logger.info(f"Starting comprehensive download for: {youtube_url}")
-    
-    # Strategy 1: Try with browser cookies (Chrome first, then Firefox)
-    for browser in ["chrome", "firefox", "edge", "safari"]:
-        logger.info(f"Trying {browser} cookies...")
-        result = download_with_cookies_from_browser(youtube_url, output_dir, browser)
-        if result:
-            return result
-        # Small delay between attempts
-        import time
-        time.sleep(1)
-    
-    # Strategy 2: Try without cookies with different user agents
-    logger.info("Trying without cookies...")
-    result = download_without_cookies(youtube_url, output_dir)
-    if result:
-        return result
-    
-    # Strategy 3: Download best audio and convert manually
-    logger.info("Trying best audio download with manual conversion...")
-    result = download_best_audio_only(youtube_url, output_dir)
-    if result:
-        return result
-    
-    logger.error(f"All download strategies failed for: {youtube_url}")
-    return None
+        logger.error(f"Error saving base64 audio: {str(e)}")
+        return False
 
 def extract_features_from_audio_file(audio_path: str) -> Dict:
     """Extract audio features from local audio file using librosa"""
@@ -345,96 +240,80 @@ def extract_features_from_audio_file(audio_path: str) -> Dict:
         logger.error(f"Error extracting features from {audio_path}: {str(e)}")
         raise
 
-def extract_features_from_youtube(url: str) -> Dict:
-    """Extract audio features from YouTube URL using comprehensive download strategy"""
+def process_audio_from_sources(track: TrackRequest) -> Dict:
+    """Process audio from various sources (URL, base64, or metadata only)"""
     temp_dir = None
     
     try:
-        # Check dependencies first
-        deps = check_dependencies()
-        if not deps['yt-dlp']:
-            raise ValueError("yt-dlp is not available")
-        if not deps['ffmpeg']:
-            logger.warning("ffmpeg not found - audio conversion may fail")
-        
         # Create temporary directory
         temp_dir = tempfile.mkdtemp()
         logger.info(f"Created temp directory: {temp_dir}")
         
-        # Use comprehensive download strategy
-        audio_path = download_audio_comprehensive(url, temp_dir)
+        audio_path = None
+        
+        # Try different audio sources
+        if track.audio_url:
+            # Download from direct URL
+            audio_path = os.path.join(temp_dir, "audio_from_url")
+            success = download_audio_from_url(track.audio_url, audio_path)
+            if not success:
+                audio_path = None
+        
+        elif track.audio_base64:
+            # Save from base64 data
+            audio_path = os.path.join(temp_dir, "audio_from_base64")
+            success = save_base64_audio(track.audio_base64, audio_path)
+            if not success:
+                audio_path = None
         
         if not audio_path:
-            raise ValueError("Failed to download audio from YouTube using all available methods")
+            raise ValueError("No valid audio source provided. Please provide either audio_url or audio_base64.")
         
         logger.info(f"Processing audio file: {audio_path}")
         
-        # Extract features from the downloaded file
+        # Extract features from the audio file
         features = extract_features_from_audio_file(audio_path)
         
         return features
         
     except Exception as e:
-        logger.error(f"Error processing YouTube URL {url}: {str(e)}")
+        logger.error(f"Error processing audio: {str(e)}")
         raise
     
     finally:
         # Cleanup temporary files and directory
         if temp_dir and os.path.exists(temp_dir):
             try:
-                import shutil
                 shutil.rmtree(temp_dir)
                 logger.debug(f"Cleaned up temp directory: {temp_dir}")
             except Exception as cleanup_error:
                 logger.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
 
-async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
+def process_track_batch_sync(tracks: List[TrackRequest]) -> List[TrackResult]:
     """Process a batch of tracks synchronously"""
     results = []
     
-    # Step 1: Search for YouTube URLs for all tracks in batch
-    async with aiohttp.ClientSession() as session:
-        search_tasks = [
-            search_youtube_url(session, track.title, track.artist) 
-            for track in tracks
-        ]
-        youtube_urls = await asyncio.gather(*search_tasks, return_exceptions=True)
-    
-    # Step 2: Process each track with its YouTube URL
-    for i, track in enumerate(tracks):
+    for track in tracks:
         result = TrackResult(
             title=track.title,
             artist=track.artist,
-            youtube_url=None,
+            metadata=None,
             audio_features=None,
             error=None
         )
         
         try:
-            # Handle search result
-            if isinstance(youtube_urls[i], Exception):
-                result.error = f"Search error: {str(youtube_urls[i])}"
-                results.append(result)
-                continue
+            # Step 1: Get metadata (always available)
+            metadata = get_track_metadata(track.title, track.artist)
+            result.metadata = metadata
             
-            youtube_url = youtube_urls[i]
-            if not youtube_url:
-                result.error = "No YouTube URL found"
-                results.append(result)
-                continue
-            
-            result.youtube_url = youtube_url
-            
-            # Extract audio features using thread pool
-            loop = asyncio.get_event_loop()
-            features_dict = await loop.run_in_executor(
-                executor, 
-                extract_features_from_youtube, 
-                youtube_url
-            )
-            
-            result.audio_features = AudioFeatures(**features_dict)
-            logger.info(f"Successfully processed {track.title} by {track.artist}")
+            # Step 2: Process audio if available
+            if track.audio_url or track.audio_base64:
+                features_dict = process_audio_from_sources(track)
+                result.audio_features = AudioFeatures(**features_dict)
+                logger.info(f"Successfully processed {track.title} by {track.artist}")
+            else:
+                logger.info(f"No audio source provided for {track.title} by {track.artist}, metadata only")
             
         except Exception as e:
             result.error = f"Processing error: {str(e)}"
@@ -444,20 +323,25 @@ async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
     
     return results
 
+async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
+    """Process a batch of tracks asynchronously"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, process_track_batch_sync, tracks)
+
 @audio_feature_router.post("/analyze", response_model=BatchResponse)
 async def analyze_audio_features(batch: TrackBatch):
     """
     Analyze audio features for a batch of tracks.
-    Processes tracks in groups of 3 synchronously.
+    Supports direct audio URLs or base64 encoded audio data.
     """
     try:
         all_results = []
         total_tracks = len(batch.tracks)
         
-        # Check dependencies at startup
+        # Check dependencies
         deps = check_dependencies()
-        if not deps['yt-dlp']:
-            raise HTTPException(status_code=500, detail="yt-dlp is not available")
+        if not deps['librosa']:
+            raise HTTPException(status_code=500, detail="librosa is not available")
         
         # Process tracks in batches of 3
         for i in range(0, total_tracks, 3):
@@ -467,20 +351,21 @@ async def analyze_audio_features(batch: TrackBatch):
             batch_results = await process_track_batch(batch_tracks)
             all_results.extend(batch_results)
             
-            # Delay between batches to avoid rate limiting
+            # Small delay between batches
             if i + 3 < total_tracks:
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
         
         # Calculate statistics
         successful = len([r for r in all_results if r.audio_features is not None])
         failed = len([r for r in all_results if r.error is not None])
+        metadata_only = len([r for r in all_results if r.metadata is not None and r.audio_features is None and r.error is None])
         
-        logger.info(f"Batch processing complete: {successful} successful, {failed} failed out of {total_tracks}")
+        logger.info(f"Batch processing complete: {successful} with features, {metadata_only} metadata only, {failed} failed out of {total_tracks}")
         
         return BatchResponse(
             results=all_results,
             total_processed=total_tracks,
-            successful=successful,
+            successful=successful + metadata_only,  # Count metadata-only as successful
             failed=failed
         )
         
@@ -498,12 +383,83 @@ async def analyze_single_track(track: TrackRequest):
         logger.error(f"Error processing single track: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Single track processing failed: {str(e)}")
 
+@audio_feature_router.post("/analyze_upload")
+async def analyze_uploaded_file(
+    file: UploadFile = File(...),
+    title: str = "Unknown",
+    artist: str = "Unknown"
+):
+    """Analyze audio features from uploaded file"""
+    temp_dir = None
+    
+    try:
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        
+        # Save uploaded file
+        file_path = os.path.join(temp_dir, f"uploaded_{file.filename}")
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        logger.info(f"Uploaded file saved to: {file_path}")
+        
+        # Extract features
+        features_dict = extract_features_from_audio_file(file_path)
+        
+        # Get metadata
+        metadata = get_track_metadata(title, artist)
+        
+        return TrackResult(
+            title=title,
+            artist=artist,
+            metadata=metadata,
+            audio_features=AudioFeatures(**features_dict),
+            error=None
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing uploaded file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"File processing failed: {str(e)}")
+    
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logger.warning(f"Error cleaning up: {cleanup_error}")
+
+@audio_feature_router.get("/metadata/{artist}/{title}")
+async def get_track_metadata_endpoint(artist: str, title: str):
+    """Get track metadata only (no audio processing)"""
+    try:
+        metadata = get_track_metadata(title, artist)
+        if metadata:
+            return {
+                "found": True,
+                "metadata": metadata
+            }
+        else:
+            return {
+                "found": False,
+                "message": "No metadata found"
+            }
+    except Exception as e:
+        logger.error(f"Error getting metadata: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Metadata retrieval failed: {str(e)}")
+
 @audio_feature_router.get("/health")
 async def health_check():
     """Health check endpoint"""
     deps = check_dependencies()
     return {
-        "status": "healthy" if deps['yt-dlp'] else "degraded",
+        "status": "healthy" if deps['librosa'] else "degraded",
         "service": "audio_feature_analyzer",
-        "dependencies": deps
+        "dependencies": deps,
+        "supported_sources": [
+            "Direct audio URLs",
+            "Base64 encoded audio",
+            "File uploads",
+            "Metadata-only queries"
+        ]
     }

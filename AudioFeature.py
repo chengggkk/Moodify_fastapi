@@ -127,7 +127,7 @@ def download_with_cookies_from_browser(youtube_url: str, output_dir: str, browse
     try:
         command = [
             "yt-dlp",
-            "--cookies-from-browser", browser,
+            "--cookies", "cookies.txt",
             "-x", "--audio-format", "mp3",
             "--audio-quality", "0",  # Best quality
             "--output", f"{output_dir}/%(title)s.%(ext)s",

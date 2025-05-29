@@ -74,37 +74,68 @@ def calculate_song_similarity(query_artist, query_title, result_artist, result_t
         boost += 10
     return int((artist_score + title_score) / 2 + boost)
 
-
 async def search_genius_api(title: str, artist: str) -> Optional[dict]:
     if not GENIUS_API_KEY:
+        print("GENIUS_API_KEY is missing.")
         return None
 
-    headers = {"Authorization": f"Bearer {GENIUS_API_KEY}"}
-    params = {"q": f"{artist} {title}"}
+    print(f"Searching for song on Genius API: {artist} - {title}")
+    search_query = f"{artist} {title}"
+    search_url = "https://api.genius.com/search"
+    headers = {
+        "Authorization": f"Bearer {GENIUS_API_KEY}",
+        "Accept": "application/json"
+    }
+    params = {"q": search_query}
 
     try:
-        response = requests.get("https://api.genius.com/search", headers=headers, params=params)
-        response.raise_for_status()
-        hits = response.json().get("response", {}).get("hits", [])
+        response = requests.get(search_url, headers=headers, params=params)
+        if response.status_code != 200:
+            raise Exception(f"Genius API search failed: {response.status_code}")
+
+        data = response.json()
+        hits = data.get("response", {}).get("hits", [])
         if not hits:
+            print("No results found on Genius API.")
             return None
 
-        best_match, best_score = None, 0
+        best_match = None
+        best_score = 0
+
         query_artist = normalize_string(artist)
         query_title = normalize_string(title)
 
         for hit in hits:
-            result = hit.get("result", {})
+            result = hit.get("result")
+            if not result:
+                continue
+
             result_artist = normalize_string(result.get("primary_artist", {}).get("name", ""))
             result_title = normalize_string(result.get("title", ""))
-            score = calculate_song_similarity(query_artist, query_title, result_artist, result_title, artist, title)
-            if score > best_score:
-                best_score, best_match = score, result
 
-        return best_match if best_score >= 70 else None
-    except requests.RequestException:
+            score = calculate_song_similarity(
+                query_artist, query_title,
+                result_artist, result_title,
+                artist, title
+            )
+
+            print(f"Candidate: {result.get('primary_artist', {}).get('name', '')} - {result.get('title', '')} (Score: {score})")
+
+            if score > best_score:
+                best_score = score
+                best_match = result
+
+        MIN_SCORE_THRESHOLD = 70
+        if best_match and best_score >= MIN_SCORE_THRESHOLD:
+            print(f"✓ Best match: {best_match['primary_artist']['name']} - {best_match['title']} (Score: {best_score})")
+            return best_match
+
+        print(f"✗ No good match found. Best score: {best_score} (threshold: {MIN_SCORE_THRESHOLD})")
         return None
 
+    except Exception as e:
+        print(f"Genius API search error: {str(e)}")
+        return None
 
 async def search_web_for_lyrics(title: str, artist: str) -> list:
     brave_api_key = os.getenv("BRAVE_API_KEY")

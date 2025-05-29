@@ -260,11 +260,10 @@ Follow these steps:
 - **Step 2 (Cross-reference):** Analyze the search results and extracted content. Identify recurring song mentions, lyrical themes, or genre tags that align with the user’s intent.
 - **Step 3 (Self-consistency):** Choose songs that are consistently relevant across multiple sources.
 - **Step 4 (Emotion tuning):** Ensure the tone, emotion, or storytelling of the song matches the user's desired theme (e.g., nostalgic, hopeful, dark, energetic).
-- **Step 5 (Diversity):** Provide variety across eras, languages (if applicable), or styles while keeping the core theme consistent.
-- **Step 6 (Validate metadata):** Where possible, confirm the album name and year of publication.
+- **Step 5 (Validate metadata):** Where possible, confirm the album name and year of publication.
 
 ⚠️ Output Constraints:
-- Return ONLY a **valid JSON array** of up to 15 songs.
+- Return ONLY a **valid JSON array** of the songs.
 - Each object must have: 
   - `"title"` (string),
   - `"artist"` (string),
@@ -306,7 +305,7 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
             
             # Parse JSON response
             songs_data = json.loads(content)
-            songs = [Song(title=song["title"], artist=song["artist"]) for song in songs_data]
+            songs = [Song(title=song["title"], artist=song["artist"], album=song['album'], publish_year=song['publish year']) for song in songs_data]
             return songs
             
         except json.JSONDecodeError as e:

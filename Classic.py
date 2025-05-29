@@ -256,13 +256,13 @@ class MusicRecommendationService:
         Use the diverse search results and website content to find actual song titles and artists. 
         The search was performed using multiple optimized queries to ensure comprehensive coverage.
         
-        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields. 
-        Do not include any additional text or formatting.
+        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields (required), 
+        and optionally 'album' and 'publish_year' fields. Do not include any additional text or formatting.
         
         Example format:
         [
-            {"title": "Song Name", "artist": "Artist Name", "album": "string or null", "publish year": "int or year"},
-            {"title": "Another Song", "artist": "Another Artist" , "album": "string or null", "publish_year": "int or year"}
+            {"title": "Song Name", "artist": "Artist Name"},
+            {"title": "Another Song", "artist": "Another Artist", "album": "Album Name", "publish_year": 2020}
         ]"""
         
         user_message = f"""User Request: {user_prompt}
@@ -292,11 +292,31 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
             
             # Parse JSON response
             songs_data = json.loads(content)
-            songs = [Song(title=song["title"], artist=song["artist"], album=song["album"], publish_year=song["publish_year"]) for song in songs_data]
+            
+            # Create Song objects with proper error handling for missing fields
+            songs = []
+            for song in songs_data:
+                try:
+                    song_obj = Song(
+                        title=song.get("title", "Unknown Title"),
+                        artist=song.get("artist", "Unknown Artist"),
+                        album=song.get("album"),  # This will be None if not present
+                        publish_year=song.get("publish_year")  # This will be None if not present
+                    )
+                    songs.append(song_obj)
+                except Exception as e:
+                    print(f"Error creating song object: {e}, song data: {song}")
+                    # Create a minimal song object if there's an error
+                    songs.append(Song(
+                        title=str(song.get("title", "Unknown Title")),
+                        artist=str(song.get("artist", "Unknown Artist"))
+                    ))
+            
             return songs
             
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}")
+            print(f"Response content: {content}")
             # Fallback: create default songs based on prompt keywords
             return self.create_fallback_songs(user_prompt)
         except Exception as e:

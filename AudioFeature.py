@@ -58,9 +58,9 @@ class BatchResponse(BaseModel):
 executor = ThreadPoolExecutor(max_workers=3)
 
 def download_song_from_youtube_music(title: str, artist: str):
-    """Download song from YouTube Music following your exact pattern"""
+    """Download song from YouTube Music using ytmusicapi + yt-dlp - YouTube Music ONLY"""
     try:
-        # 1. Search on YouTube Music
+        # 1. Search on YouTube Music specifically
         results = ytmusic.search(query=f"{title} {artist}", filter="songs")
         if not results:
             raise Exception("Song not found on YouTube Music")
@@ -68,20 +68,24 @@ def download_song_from_youtube_music(title: str, artist: str):
         song = results[0]
         video_id = song["videoId"]
         duration = song["duration"]
-        yt_url = f"https://music.youtube.com/watch?v={video_id}"
+        # Use YouTube Music URL format
+        yt_music_url = f"https://music.youtube.com/watch?v={video_id}"
         
         # 2. Prepare download directory
         tmpdir = tempfile.mkdtemp()
         output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
         
         try:
-            # 3. Run yt-dlp to download audio
+            # 3. Run yt-dlp to download audio from YouTube Music URL
+            # Note: We use the YouTube Music URL but yt-dlp internally redirects to YouTube
+            # This ensures we're getting the Music version of the track
             result = subprocess.run(
                 [
                     "yt-dlp",
                     "-x", "--audio-format", "mp3",
                     "--output", output_path,
-                    f"https://www.youtube.com/watch?v={video_id}"
+                    # Use YouTube Music URL to ensure we get the Music version
+                    yt_music_url
                 ],
                 capture_output=True,
                 text=True
@@ -104,7 +108,7 @@ def download_song_from_youtube_music(title: str, artist: str):
             return {
                 "title": title,
                 "artist": artist,
-                "youtube_music_url": yt_url,
+                "youtube_music_url": yt_music_url,
                 "video_id": video_id,
                 "duration": duration,
                 "audio_path": downloaded_file,
@@ -181,12 +185,12 @@ def extract_features_from_audio_file(audio_path: str) -> Dict:
 def get_audio_features_simple(title: str, artist: str) -> Dict:
     """
     Simple function: input title and artist, get audio features
-    Uses your exact YouTube Music download pattern
+    Uses YouTube Music ONLY - no regular YouTube downloads
     """
     download_result = None
     
     try:
-        # Step 1: Download from YouTube Music using your exact pattern
+        # Step 1: Download from YouTube Music using ytmusicapi search + yt-dlp
         download_result = download_song_from_youtube_music(title, artist)
         
         if not download_result["success"]:
@@ -275,7 +279,7 @@ async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
 @audio_feature_router.get("/download")
 def download_song(title: str, artist: str):
     """
-    Your original download endpoint - just downloads without feature extraction
+    Download endpoint - Downloads from YouTube Music ONLY
     """
     try:
         # 1. Search on YouTube Music
@@ -286,19 +290,21 @@ def download_song(title: str, artist: str):
         song = results[0]
         video_id = song["videoId"]
         duration = song["duration"]
-        yt_url = f"https://music.youtube.com/watch?v={video_id}"
+        # Use YouTube Music URL
+        yt_music_url = f"https://music.youtube.com/watch?v={video_id}"
         
         # 2. Prepare download directory
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
             
-            # 3. Run yt-dlp to download audio
+            # 3. Run yt-dlp to download audio from YouTube Music
             result = subprocess.run(
                 [
                     "yt-dlp",
                     "-x", "--audio-format", "mp3",
                     "--output", output_path,
-                    f"https://www.youtube.com/watch?v={video_id}"
+                    # Use YouTube Music URL to ensure Music version
+                    yt_music_url
                 ],
                 capture_output=True,
                 text=True
@@ -311,10 +317,11 @@ def download_song(title: str, artist: str):
             return {
                 "title": title,
                 "artist": artist,
-                "youtube_music_url": yt_url,
+                "youtube_music_url": yt_music_url,
                 "video_id": video_id,
                 "duration": duration,
                 "audio_path": output_path,
+                "source": "YouTube Music",
                 "audio_features": None  # You can extract using librosa later
             }
             
@@ -324,8 +331,8 @@ def download_song(title: str, artist: str):
 @audio_feature_router.get("/simple_analyze")
 def simple_analyze(title: str, artist: str):
     """
-    Simple endpoint: just input title and artist, get audio features
-    Downloads from YouTube Music using your exact pattern
+    Simple endpoint: input title and artist, get audio features
+    Downloads from YouTube Music ONLY using ytmusicapi search
     """
     try:
         result = get_audio_features_simple(title, artist)
@@ -333,6 +340,8 @@ def simple_analyze(title: str, artist: str):
         if result["error"]:
             raise HTTPException(status_code=500, detail=result["error"])
         
+        # Add source indicator
+        result["source"] = "YouTube Music"
         return result
         
     except HTTPException:
@@ -343,7 +352,7 @@ def simple_analyze(title: str, artist: str):
 
 @audio_feature_router.post("/analyze", response_model=BatchResponse)
 async def analyze_audio_features(batch: TrackBatch):
-    """Analyze audio features for a batch of tracks using YouTube Music"""
+    """Analyze audio features for a batch of tracks using YouTube Music ONLY"""
     try:
         all_results = []
         total_tracks = len(batch.tracks)
@@ -356,7 +365,7 @@ async def analyze_audio_features(batch: TrackBatch):
             batch_results = await process_track_batch(batch_tracks)
             all_results.extend(batch_results)
             
-            # Delay between batches
+            # Delay between batches to be respectful to YouTube Music
             if i + 3 < total_tracks:
                 await asyncio.sleep(2)
         
@@ -378,7 +387,7 @@ async def analyze_audio_features(batch: TrackBatch):
 
 @audio_feature_router.post("/analyze_single", response_model=TrackResult)
 async def analyze_single_track(track: TrackRequest):
-    """Analyze audio features for a single track"""
+    """Analyze audio features for a single track using YouTube Music ONLY"""
     try:
         batch_results = await process_track_batch([track])
         return batch_results[0]
@@ -392,11 +401,12 @@ def health_check():
     return {
         "status": "healthy",
         "service": "audio_feature_analyzer",
-        "source": "YouTube Music",
+        "source": "YouTube Music ONLY",
+        "note": "Uses ytmusicapi for search + yt-dlp for download from YouTube Music URLs",
         "endpoints": [
-            "/download - Download only (your original code)",
-            "/simple_analyze - Download + extract features", 
-            "/analyze - Batch processing",
-            "/analyze_single - Single track processing"
+            "/download - Download only from YouTube Music",
+            "/simple_analyze - Download from YouTube Music + extract features", 
+            "/analyze - Batch processing (YouTube Music only)",
+            "/analyze_single - Single track processing (YouTube Music only)"
         ]
     }

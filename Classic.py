@@ -320,7 +320,7 @@ class MusicRecommendationService:
         system_prompt = f"""You are a music recommendation expert. Based on the user's request, search results, and website content, recommend exactly {requested_count} songs.
 
         CRITICAL REQUIREMENTS:
-        1. Return EXACTLY {requested_count} songs (not more, not less)
+        1. Return EXACTLY {user_prompt} songs if user request in the prompt (not more, not less)
         2. Primary language preference: {detected_language}
         3. Keep original song titles and artist names in their native language/script
         4. For Korean songs: Use 한글 (Hangul) for Korean titles/artists

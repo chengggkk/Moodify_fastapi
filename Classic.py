@@ -56,7 +56,7 @@ class MusicRecommendationService:
                 {
                     "role": "system",
                     "content": """You are a music search query generator. Given a user's music request, 
-                    generate 3 different optimized search queries that would help find relevant songs.
+                    generate 3 different optimized search queries that would help find relevant songs please use KEY WORDS to search.
                     
                     For each query, consider:
                     1. General English search terms
@@ -67,10 +67,10 @@ class MusicRecommendationService:
                     
                     Examples:
                     Input: "give me K-drama romantic OST"
-                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST 2024"]
+                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST this year"]
                     
-                    Input: "taylor swift sad songs"
-                    Output: ["taylor swift sad songs", "taylor swift heartbreak ballads", "taylor swift emotional songs best"]
+                    Input: "taylor swift TTPD tracks"
+                    Output: ["taylor swift TTPD", "taylor swift THE TORTURED POETS DEPARTMENT", "taylor swift new album tracks"]
                     """
                 },
                 {
@@ -128,9 +128,7 @@ class MusicRecommendationService:
         
         params = {
             "q": query,
-            "count": 15,  # Increased from 8 to 15
-            "search_lang": "en",
-            "country": "US",
+            "count": 5,  # Increased from 8 to 15
             "safesearch": "moderate",
             "freshness": "pw"  # Past week for more recent results
         }
@@ -180,7 +178,7 @@ class MusicRecommendationService:
                 unique_urls.append(url)
                 seen_urls.add(url)
         
-        return all_results, unique_urls[:25]  # Increased from 15 to 25 URLs
+        return all_results, unique_urls[:5] 
     
     async def extract_html_content(self, url: str) -> str:
         """Extract and clean HTML content using BeautifulSoup"""

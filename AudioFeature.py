@@ -1,412 +1,477 @@
-# audio_feature_router.py
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-from typing import List, Dict, Optional
-import asyncio
-import subprocess
-import librosa
-import numpy as np
-import tempfile
-import os
-import logging
-from concurrent.futures import ThreadPoolExecutor
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, validator
+from typing import Optional, List, Dict, Any
+import requests
+from bs4 import BeautifulSoup
+import re
 import json
-import glob
-import shutil
-from ytmusicapi import YTMusic
+import time
+from urllib.parse import quote, urljoin
+import logging
+from dataclasses import dataclass, asdict
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import uuid
 
+# Pydantic models for request/response
+class SpotifyUrlRequest(BaseModel):
+    spotify_url: str
+    
+    @validator('spotify_url')
+    def validate_spotify_url(cls, v):
+        patterns = [
+            r'spotify\.com/track/([a-zA-Z0-9]+)',
+            r'spotify:track:([a-zA-Z0-9]+)',
+            r'open\.spotify\.com/track/([a-zA-Z0-9]+)',
+        ]
+        
+        if not any(re.search(pattern, v) for pattern in patterns):
+            raise ValueError('Invalid Spotify URL format')
+        return v
 
-logger = logging.getLogger(__name__)
+class BatchAnalysisRequest(BaseModel):
+    spotify_urls: List[str]
+    
+    @validator('spotify_urls')
+    def validate_urls(cls, v):
+        if len(v) > 50:  # Limit batch size
+            raise ValueError('Maximum 50 URLs allowed per batch')
+        
+        patterns = [
+            r'spotify\.com/track/([a-zA-Z0-9]+)',
+            r'spotify:track:([a-zA-Z0-9]+)',
+            r'open\.spotify\.com/track/([a-zA-Z0-9]+)',
+        ]
+        
+        for url in v:
+            if not any(re.search(pattern, url) for pattern in patterns):
+                raise ValueError(f'Invalid Spotify URL format: {url}')
+        return v
 
-audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
-ytmusic = YTMusic()  # Anonymous mode (no cookies)
+class AudioFeaturesResponse(BaseModel):
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    key: Optional[str] = None
+    bpm: Optional[int] = None
+    camelot: Optional[str] = None
+    energy: Optional[int] = None
+    danceability: Optional[int] = None
+    happiness: Optional[int] = None
+    popularity: Optional[int] = None
+    acousticness: Optional[int] = None
+    instrumentalness: Optional[int] = None
+    liveness: Optional[int] = None
+    speechiness: Optional[int] = None
+    loudness: Optional[int] = None
+    duration_ms: Optional[int] = None
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "title": "Shape of You",
+                "artist": "Ed Sheeran",
+                "key": "C# Minor",
+                "bpm": 96,
+                "camelot": "4A",
+                "energy": 65,
+                "danceability": 83,
+                "happiness": 93,
+                "popularity": 74,
+                "acousticness": 58,
+                "instrumentalness": 0,
+                "liveness": 9,
+                "speechiness": 8,
+                "loudness": -3,
+                "duration_ms": 233713
+            }
+        }
 
-# Pydantic models
-class TrackRequest(BaseModel):
-    title: str
-    artist: str
+class AnalysisResult(BaseModel):
+    spotify_url: str
+    success: bool
+    features: Optional[AudioFeaturesResponse] = None
+    error: Optional[str] = None
+    analyzed_at: str
 
-class TrackBatch(BaseModel):
-    tracks: List[TrackRequest]
-
-class AudioFeatures(BaseModel):
-    tempo: float
-    energy: float
-    spectral_centroid: float
-    zero_crossing_rate: float
-    mfcc_mean: List[float]
-    chroma_mean: List[float]
-    rolloff: float
-    rms_energy: float
-
-class TrackResult(BaseModel):
-    title: str
-    artist: str
-    youtube_music_url: Optional[str] = None
-    video_id: Optional[str] = None
-    duration: Optional[str] = None
-    audio_features: Optional[AudioFeatures]
-    error: Optional[str]
-
-class BatchResponse(BaseModel):
-    results: List[TrackResult]
-    total_processed: int
+class BatchAnalysisResponse(BaseModel):
+    batch_id: str
+    total_urls: int
     successful: int
     failed: int
+    results: List[AnalysisResult]
 
-# Thread pool for CPU-intensive audio processing
-executor = ThreadPoolExecutor(max_workers=3)
+# Enhanced TuneBat Scraper (optimized for async usage)
+@dataclass
+class AudioFeatures:
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    key: Optional[str] = None
+    bmp: Optional[int] = None
+    camelot: Optional[str] = None
+    energy: Optional[int] = None
+    danceability: Optional[int] = None
+    happiness: Optional[int] = None
+    popularity: Optional[int] = None
+    acousticness: Optional[int] = None
+    instrumentalness: Optional[int] = None
+    liveness: Optional[int] = None
+    speechiness: Optional[int] = None
+    loudness: Optional[int] = None
+    duration_ms: Optional[int] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {k: v for k, v in asdict(self).items() if v is not None}
 
-def download_song_from_youtube_music(title: str, artist: str):
-    """Download song from YouTube Music using ytmusicapi + yt-dlp - YouTube Music ONLY"""
-    try:
-        # 1. Search on YouTube Music specifically
-        results = ytmusic.search(query=f"{title} {artist}", filter="songs")
-        if not results:
-            raise Exception("Song not found on YouTube Music")
+class TuneBatScraper:
+    def __init__(self, delay_between_requests: float = 1.0):
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
+        self.base_url = "https://tunebat.com"
+        self.delay = delay_between_requests
         
-        song = results[0]
-        video_id = song["videoId"]
-        duration = song["duration"]
-        # Use YouTube Music URL format
-        yt_music_url = f"https://music.youtube.com/watch?v={video_id}"
+        # Setup logging
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+    
+    def extract_spotify_id(self, spotify_url: str) -> str:
+        """Extract Spotify track ID from various URL formats"""
+        patterns = [
+            r'spotify\.com/track/([a-zA-Z0-9]+)',
+            r'spotify:track:([a-zA-Z0-9]+)',
+            r'open\.spotify\.com/track/([a-zA-Z0-9]+)',
+        ]
         
-        # 2. Prepare download directory
-        tmpdir = tempfile.mkdtemp()
-        output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
+        for pattern in patterns:
+            match = re.search(pattern, spotify_url)
+            if match:
+                return match.group(1)
         
+        raise ValueError(f"Invalid Spotify URL format: {spotify_url}")
+    
+    def get_track_by_direct_url(self, spotify_id: str) -> Optional[AudioFeatures]:
+        """Try to get track info using direct TuneBat URL"""
         try:
-            # 3. Run yt-dlp to download audio from YouTube Music URL
-            # Note: We use the YouTube Music URL but yt-dlp internally redirects to YouTube
-            # This ensures we're getting the Music version of the track
-            result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "-x", "--audio-format", "mp3",
-                    "--output", output_path,
-                    # Use YouTube Music URL to ensure we get the Music version
-                    yt_music_url
-                ],
-                capture_output=True,
-                text=True
-            )
+            track_url = f"{self.base_url}/Info/{spotify_id}"
+            self.logger.info(f"Trying direct URL: {track_url}")
             
-            if result.returncode != 0:
-                raise Exception(f"yt-dlp error: {result.stderr}")
+            response = self.session.get(track_url, timeout=15)
+            response.raise_for_status()
             
-            # Find the downloaded file
-            downloaded_file = None
-            for file in os.listdir(tmpdir):
-                if file.endswith(('.mp3', '.webm', '.m4a')):
-                    downloaded_file = os.path.join(tmpdir, file)
-                    break
+            if "404" in response.text or "not found" in response.text.lower():
+                return None
             
-            if not downloaded_file:
-                raise Exception("Downloaded file not found")
-            
-            # 4. Return info with file path
-            return {
-                "title": title,
-                "artist": artist,
-                "youtube_music_url": yt_music_url,
-                "video_id": video_id,
-                "duration": duration,
-                "audio_path": downloaded_file,
-                "temp_dir": tmpdir,
-                "success": True,
-                "error": None
-            }
+            soup = BeautifulSoup(response.text, 'html.parser')
+            return self._parse_track_page(soup)
             
         except Exception as e:
-            # Cleanup on error
-            if os.path.exists(tmpdir):
-                shutil.rmtree(tmpdir)
-            raise e
+            self.logger.warning(f"Direct URL failed: {e}")
+            return None
+    
+    def _parse_track_page(self, soup: BeautifulSoup) -> AudioFeatures:
+        """Parse track page and extract audio features"""
+        features = AudioFeatures()
+        
+        try:
+            # Title and artist from headers
+            h1 = soup.find('h1')
+            if h1:
+                features.title = h1.get_text().strip()
+            
+            h2 = soup.find('h2') 
+            if h2:
+                features.artist = h2.get_text().strip()
+            
+            # Parse page text for features
+            page_text = soup.get_text()
+            
+            # Key patterns
+            key_patterns = [
+                re.compile(r'([A-G]#?)\s*(Major|Minor)', re.I),
+                re.compile(r'Key[:\s]+([A-G]#?\s*(?:Major|Minor|maj|min))', re.I)
+            ]
+            
+            for pattern in key_patterns:
+                if not features.key:
+                    match = pattern.search(page_text)
+                    if match:
+                        if len(match.groups()) == 2:
+                            key = match.group(1)
+                            scale = match.group(2)
+                            features.key = f"{key} {scale.title()}"
+                        else:
+                            features.key = match.group(1).strip()
+                        break
+            
+            # BPM patterns
+            bpm_patterns = [
+                re.compile(r'(\d+)\s*BPM', re.I),
+                re.compile(r'BPM[:\s]+(\d+)', re.I),
+                re.compile(r'Tempo[:\s]+(\d+)', re.I)
+            ]
+            
+            for pattern in bpm_patterns:
+                if not features.bpm:
+                    match = pattern.search(page_text)
+                    if match:
+                        features.bpm = int(match.group(1))
+                        break
+            
+            # Audio feature patterns
+            feature_patterns = {
+                'energy': re.compile(r'Energy[:\s]+(\d+)', re.I),
+                'danceability': re.compile(r'Danceability[:\s]+(\d+)', re.I),
+                'happiness': re.compile(r'(?:Happiness|Valence)[:\s]+(\d+)', re.I),
+                'popularity': re.compile(r'Popularity[:\s]+(\d+)', re.I),
+                'acousticness': re.compile(r'Acousticness[:\s]+(\d+)', re.I),
+                'instrumentalness': re.compile(r'Instrumentalness[:\s]+(\d+)', re.I),
+                'liveness': re.compile(r'Liveness[:\s]+(\d+)', re.I),
+                'speechiness': re.compile(r'Speechiness[:\s]+(\d+)', re.I),
+                'loudness': re.compile(r'Loudness[:\s]+(-?\d+)', re.I)
+            }
+            
+            for feature, pattern in feature_patterns.items():
+                match = pattern.search(page_text)
+                if match:
+                    setattr(features, feature, int(match.group(1)))
+            
+            # Camelot notation
+            camelot_match = re.search(r'(\d+[AB])', page_text)
+            if camelot_match:
+                features.camelot = camelot_match.group(1)
+            
+            # Duration pattern (MM:SS)
+            duration_match = re.search(r'(\d+):(\d+)', page_text)
+            if duration_match:
+                minutes = int(duration_match.group(1))
+                seconds = int(duration_match.group(2))
+                features.duration_ms = (minutes * 60 + seconds) * 1000
+                
+        except Exception as e:
+            self.logger.error(f"Error parsing track page: {e}")
+        
+        return features
+    
+    def analyze_spotify_url(self, spotify_url: str) -> Optional[AudioFeatures]:
+        """Main method to analyze a Spotify URL"""
+        try:
+            self.logger.info(f"Analyzing: {spotify_url}")
+            
+            # Extract Spotify ID
+            spotify_id = self.extract_spotify_id(spotify_url)
+            
+            # Try direct URL
+            features = self.get_track_by_direct_url(spotify_id)
+            
+            if features and features.title:
+                self.logger.info("Success with direct URL")
+                return features
+            
+            self.logger.warning(f"Could not analyze: {spotify_url}")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Analysis failed for {spotify_url}: {e}")
+            return None
+        
+        finally:
+            time.sleep(self.delay)
+
+# Global scraper instance
+scraper = TuneBatScraper(delay_between_requests=1.5)
+
+# Thread pool for async operations
+executor = ThreadPoolExecutor(max_workers=5)
+
+# Router definition
+audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
+
+@audio_feature_router.get("/")
+async def get_audio_features_root():
+    """Root endpoint with API information"""
+    return {
+        "message": "TuneBat Audio Features API",
+        "version": "1.0.0",
+        "endpoints": {
+            "analyze": "POST /analyze - Analyze single Spotify URL",
+            "batch": "POST /batch - Analyze multiple Spotify URLs",
+            "health": "GET /health - Health check"
+        }
+    }
+
+@audio_feature_router.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "service": "tunebat-scraper"}
+
+@audio_feature_router.post("/analyze", response_model=AnalysisResult)
+async def analyze_single_track(request: SpotifyUrlRequest):
+    """
+    Analyze a single Spotify URL and return audio features from TuneBat
+    
+    - **spotify_url**: Valid Spotify track URL
+    """
+    try:
+        # Run scraping in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        features = await loop.run_in_executor(
+            executor, 
+            scraper.analyze_spotify_url, 
+            request.spotify_url
+        )
+        
+        if features:
+            return AnalysisResult(
+                spotify_url=request.spotify_url,
+                success=True,
+                features=AudioFeaturesResponse(**features.to_dict()),
+                analyzed_at=time.strftime("%Y-%m-%d %H:%M:%S")
+            )
+        else:
+            return AnalysisResult(
+                spotify_url=request.spotify_url,
+                success=False,
+                error="Track not found in TuneBat database",
+                analyzed_at=time.strftime("%Y-%m-%d %H:%M:%S")
+            )
             
     except Exception as e:
-        return {
-            "title": title,
-            "artist": artist,
-            "youtube_music_url": None,
-            "video_id": None,
-            "duration": None,
-            "audio_path": None,
-            "temp_dir": None,
-            "success": False,
-            "error": str(e)
-        }
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Analysis failed: {str(e)}"
+        )
 
-def extract_features_from_audio_file(audio_path: str) -> Dict:
-    """Extract audio features from local audio file using librosa"""
-    try:
-        # Load audio with librosa
-        y, sr = librosa.load(audio_path, sr=22050, duration=30)
-        
-        if len(y) == 0:
-            raise ValueError("Empty audio file")
-        
-        # Extract comprehensive audio features
-        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-        
-        rms = librosa.feature.rms(y=y)[0]
-        energy = np.mean(rms)
-        rms_energy = np.sqrt(np.mean(y**2))
-        
-        spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
-        spectral_centroid = np.mean(spectral_centroids)
-        
-        zcr = librosa.feature.zero_crossing_rate(y)[0]
-        zero_crossing_rate = np.mean(zcr)
-        
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        mfcc_mean = np.mean(mfccs, axis=1).tolist()
-        
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
-        chroma_mean = np.mean(chroma, axis=1).tolist()
-        
-        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
-        spectral_rolloff = np.mean(rolloff)
-        
-        return {
-            "tempo": float(tempo),
-            "energy": float(energy),
-            "spectral_centroid": float(spectral_centroid),
-            "zero_crossing_rate": float(zero_crossing_rate),
-            "mfcc_mean": mfcc_mean,
-            "chroma_mean": chroma_mean,
-            "rolloff": float(spectral_rolloff),
-            "rms_energy": float(rms_energy)
-        }
-        
-    except Exception as e:
-        logger.error(f"Error extracting features from {audio_path}: {str(e)}")
-        raise
-
-def get_audio_features_simple(title: str, artist: str) -> Dict:
+@audio_feature_router.post("/batch", response_model=BatchAnalysisResponse)
+async def analyze_batch_tracks(request: BatchAnalysisRequest):
     """
-    Simple function: input title and artist, get audio features
-    Uses YouTube Music ONLY - no regular YouTube downloads
+    Analyze multiple Spotify URLs in batch
+    
+    - **spotify_urls**: List of valid Spotify track URLs (max 50)
     """
-    download_result = None
-    
     try:
-        # Step 1: Download from YouTube Music using ytmusicapi search + yt-dlp
-        download_result = download_song_from_youtube_music(title, artist)
+        batch_id = str(uuid.uuid4())
         
-        if not download_result["success"]:
-            return {
-                "title": title,
-                "artist": artist,
-                "youtube_music_url": None,
-                "video_id": None,
-                "duration": None,
-                "audio_features": None,
-                "error": download_result["error"]
-            }
+        # Run batch analysis in thread pool
+        loop = asyncio.get_event_loop()
         
-        # Step 2: Extract audio features
-        audio_features = extract_features_from_audio_file(download_result["audio_path"])
-        
-        # Step 3: Return complete result
-        return {
-            "title": download_result["title"],
-            "artist": download_result["artist"],
-            "youtube_music_url": download_result["youtube_music_url"],
-            "video_id": download_result["video_id"],
-            "duration": download_result["duration"],
-            "audio_features": audio_features,
-            "error": None
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in get_audio_features_simple: {str(e)}")
-        return {
-            "title": title,
-            "artist": artist,
-            "youtube_music_url": download_result["youtube_music_url"] if download_result else None,
-            "video_id": download_result["video_id"] if download_result else None,
-            "duration": download_result["duration"] if download_result else None,
-            "audio_features": None,
-            "error": str(e)
-        }
-    
-    finally:
-        # Cleanup temporary directory
-        if download_result and download_result.get("temp_dir") and os.path.exists(download_result["temp_dir"]):
+        async def analyze_single(url: str) -> AnalysisResult:
             try:
-                shutil.rmtree(download_result["temp_dir"])
-                logger.debug(f"Cleaned up temp directory: {download_result['temp_dir']}")
-            except Exception as cleanup_error:
-                logger.warning(f"Error cleaning up: {cleanup_error}")
-
-async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
-    """Process a batch of tracks asynchronously"""
-    results = []
-    
-    for track in tracks:
-        try:
-            loop = asyncio.get_event_loop()
-            result_dict = await loop.run_in_executor(
-                executor,
-                get_audio_features_simple,
-                track.title,
-                track.artist
-            )
-            
-            result = TrackResult(
-                title=result_dict["title"],
-                artist=result_dict["artist"],
-                youtube_music_url=result_dict["youtube_music_url"],
-                video_id=result_dict["video_id"],
-                duration=result_dict["duration"],
-                audio_features=AudioFeatures(**result_dict["audio_features"]) if result_dict["audio_features"] else None,
-                error=result_dict["error"]
-            )
-            
-            results.append(result)
-            
-        except Exception as e:
-            result = TrackResult(
-                title=track.title,
-                artist=track.artist,
-                error=f"Processing error: {str(e)}"
-            )
-            results.append(result)
-            logger.error(f"Error processing {track.title} by {track.artist}: {str(e)}")
-    
-    return results
-
-@audio_feature_router.get("/download")
-def download_song(title: str, artist: str):
-    """
-    Download endpoint - Downloads from YouTube Music ONLY
-    """
-    try:
-        # 1. Search on YouTube Music
-        results = ytmusic.search(query=f"{title} {artist}", filter="songs")
-        if not results:
-            raise HTTPException(status_code=404, detail="Song not found on YouTube Music")
+                features = await loop.run_in_executor(
+                    executor,
+                    scraper.analyze_spotify_url,
+                    url
+                )
+                
+                if features:
+                    return AnalysisResult(
+                        spotify_url=url,
+                        success=True,
+                        features=AudioFeaturesResponse(**features.to_dict()),
+                        analyzed_at=time.strftime("%Y-%m-%d %H:%M:%S")
+                    )
+                else:
+                    return AnalysisResult(
+                        spotify_url=url,
+                        success=False,
+                        error="Track not found in TuneBat database",
+                        analyzed_at=time.strftime("%Y-%m-%d %H:%M:%S")
+                    )
+            except Exception as e:
+                return AnalysisResult(
+                    spotify_url=url,
+                    success=False,
+                    error=str(e),
+                    analyzed_at=time.strftime("%Y-%m-%d %H:%M:%S")
+                )
         
-        song = results[0]
-        video_id = song["videoId"]
-        duration = song["duration"]
-        # Use YouTube Music URL
-        yt_music_url = f"https://music.youtube.com/watch?v={video_id}"
+        # Process all URLs concurrently (with some throttling)
+        semaphore = asyncio.Semaphore(3)  # Limit concurrent requests
         
-        # 2. Prepare download directory
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = os.path.join(tmpdir, "%(title)s.%(ext)s")
-            
-            # 3. Run yt-dlp to download audio from YouTube Music
-            result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "-x", "--audio-format", "mp3",
-                    "--output", output_path,
-                    # Use YouTube Music URL to ensure Music version
-                    yt_music_url
-                ],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode != 0:
-                raise HTTPException(status_code=500, detail=f"yt-dlp error: {result.stderr}")
-            
-            # 4. Return basic info
-            return {
-                "title": title,
-                "artist": artist,
-                "youtube_music_url": yt_music_url,
-                "video_id": video_id,
-                "duration": duration,
-                "audio_path": output_path,
-                "source": "YouTube Music",
-                "audio_features": None  # You can extract using librosa later
-            }
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download from YouTube Music: {str(e)}")
-
-@audio_feature_router.get("/simple_analyze")
-def simple_analyze(title: str, artist: str):
-    """
-    Simple endpoint: input title and artist, get audio features
-    Downloads from YouTube Music ONLY using ytmusicapi search
-    """
-    try:
-        result = get_audio_features_simple(title, artist)
+        async def throttled_analyze(url: str):
+            async with semaphore:
+                return await analyze_single(url)
         
-        if result["error"]:
-            raise HTTPException(status_code=500, detail=result["error"])
+        results = await asyncio.gather(*[
+            throttled_analyze(url) for url in request.spotify_urls
+        ])
         
-        # Add source indicator
-        result["source"] = "YouTube Music"
-        return result
+        successful = sum(1 for r in results if r.success)
+        failed = len(results) - successful
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in simple_analyze: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
-
-@audio_feature_router.post("/analyze", response_model=BatchResponse)
-async def analyze_audio_features(batch: TrackBatch):
-    """Analyze audio features for a batch of tracks using YouTube Music ONLY"""
-    try:
-        all_results = []
-        total_tracks = len(batch.tracks)
-        
-        # Process tracks in batches of 3
-        for i in range(0, total_tracks, 3):
-            batch_tracks = batch.tracks[i:i+3]
-            logger.info(f"Processing batch {i//3 + 1}: tracks {i+1}-{min(i+3, total_tracks)} of {total_tracks}")
-            
-            batch_results = await process_track_batch(batch_tracks)
-            all_results.extend(batch_results)
-            
-            # Delay between batches to be respectful to YouTube Music
-            if i + 3 < total_tracks:
-                await asyncio.sleep(2)
-        
-        successful = len([r for r in all_results if r.audio_features is not None])
-        failed = len([r for r in all_results if r.error is not None])
-        
-        logger.info(f"Batch processing complete: {successful} successful, {failed} failed out of {total_tracks}")
-        
-        return BatchResponse(
-            results=all_results,
-            total_processed=total_tracks,
+        return BatchAnalysisResponse(
+            batch_id=batch_id,
+            total_urls=len(request.spotify_urls),
             successful=successful,
-            failed=failed
+            failed=failed,
+            results=results
         )
         
     except Exception as e:
-        logger.error(f"Error in batch processing: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch analysis failed: {str(e)}"
+        )
 
-@audio_feature_router.post("/analyze_single", response_model=TrackResult)
-async def analyze_single_track(track: TrackRequest):
-    """Analyze audio features for a single track using YouTube Music ONLY"""
-    try:
-        batch_results = await process_track_batch([track])
-        return batch_results[0]
-    except Exception as e:
-        logger.error(f"Error processing single track: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Single track processing failed: {str(e)}")
+@audio_feature_router.get("/analyze")
+async def analyze_single_track_get(
+    spotify_url: str = Query(..., description="Spotify track URL to analyze")
+):
+    """
+    Alternative GET endpoint for single track analysis
+    
+    - **spotify_url**: Valid Spotify track URL as query parameter
+    """
+    request = SpotifyUrlRequest(spotify_url=spotify_url)
+    return await analyze_single_track(request)
 
-@audio_feature_router.get("/health")
-def health_check():
-    """Health check endpoint"""
+@audio_feature_router.get("/features/{spotify_id}")
+async def get_features_by_id(spotify_id: str):
+    """
+    Get audio features by Spotify track ID
+    
+    - **spotify_id**: Spotify track ID (without spotify:track: prefix)
+    """
+    spotify_url = f"https://open.spotify.com/track/{spotify_id}"
+    request = SpotifyUrlRequest(spotify_url=spotify_url)
+    return await analyze_single_track(request)
+
+# Example usage and testing endpoints (optional)
+@audio_feature_router.get("/examples")
+async def get_examples():
+    """Get example Spotify URLs for testing"""
     return {
-        "status": "healthy",
-        "service": "audio_feature_analyzer",
-        "source": "YouTube Music ONLY",
-        "note": "Uses ytmusicapi for search + yt-dlp for download from YouTube Music URLs",
-        "endpoints": [
-            "/download - Download only from YouTube Music",
-            "/simple_analyze - Download from YouTube Music + extract features", 
-            "/analyze - Batch processing (YouTube Music only)",
-            "/analyze_single - Single track processing (YouTube Music only)"
+        "example_urls": [
+            "https://open.spotify.com/track/4iV5W9uYEdYUVa79Axb7Rh",  # Shape of You
+            "https://open.spotify.com/track/0tgVpDi06FyKpA1z0VMD4v",  # Perfect
+            "https://open.spotify.com/track/6habFhsOp2NvshLv26DqMb",  # Blinding Lights
+        ],
+        "supported_formats": [
+            "https://open.spotify.com/track/{id}",
+            "https://spotify.com/track/{id}",
+            "spotify:track:{id}"
         ]
+    }
+
+# Optional: Statistics endpoint
+@audio_feature_router.get("/stats")
+async def get_stats():
+    """Get API usage statistics (placeholder)"""
+    return {
+        "status": "operational",
+        "source": "TuneBat.com",
+        "features_available": [
+            "title", "artist", "key", "bpm", "camelot",
+            "energy", "danceability", "happiness", "popularity",
+            "acousticness", "instrumentalness", "liveness", 
+            "speechiness", "loudness", "duration_ms"
+        ],
+        "rate_limit": "1.5 seconds between requests",
+        "batch_limit": "50 URLs per batch"
     }

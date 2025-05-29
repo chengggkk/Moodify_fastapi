@@ -342,7 +342,7 @@ Requested Count(if request): (user's prompt:{user_prompt}) songs
 {search_context}
 {html_section}
 
-Generate exactly {user_prompt} songs(if request) in {detected_language} preference, preserving original language titles and artist names."""
+Generate original language titles and artist names."""
         
         payload = {
             "model": "gpt-4o-mini",

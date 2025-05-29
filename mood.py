@@ -143,46 +143,6 @@ Provide the final consensus analysis in Chinese.
     
     return final_completion.choices[0].message.content.strip()
 
-def analyze_mood_enhanced(text: str, embedding: list) -> Dict[str, Any]:
-    """
-    Enhanced mood analysis using Chain of Thought and Self-Consistency.
-    """
-    # Get self-consistent analysis
-    mood_analysis = get_self_consistency_analysis(text, embedding)
-    
-    # Additional verification step
-    verification_prompt = f"""
-PRINCIPLE INSTRUCTION: You are a quality assurance specialist for emotional analysis. Verify the accuracy and completeness of this mood analysis.
-
-ORIGINAL TEXT SAMPLE: {text[:200]}...
-MOOD ANALYSIS TO VERIFY: {mood_analysis}
-
-VERIFICATION CHECKLIST:
-✓ Emotional accuracy - Do conclusions match textual evidence?
-✓ Analytical depth - Is analysis sufficiently comprehensive?  
-✓ Evidence support - Are claims backed by specific examples?
-✓ Emotional granularity - Are subtle emotions captured?
-✓ Contextual awareness - Is broader context considered?
-
-IMPROVEMENT AREAS: Identify any missing elements or inaccuracies
-CONFIDENCE RATING: Rate analysis quality (1-10) with justification
-ENHANCEMENT SUGGESTIONS: Provide specific improvement recommendations
-
-Provide verification feedback in Chinese.
-"""
-    
-    verification = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": verification_prompt}],
-        temperature=0.1,
-        max_tokens=400
-    )
-    
-    return {
-        "mood_analysis": mood_analysis,
-        "verification": verification.choices[0].message.content.strip()
-    }
-
 # Request models
 class MoodAnalysisRequest(BaseModel):
     text: str
@@ -233,36 +193,6 @@ use short sentence to describe to mood specifically。
     except Exception as e:
         print(f"Error in mood analysis: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error analyzing mood: {str(e)}")
-
-@mood_router.post("/analyze-enhanced")
-async def analyze_mood_enhanced_endpoint(req: MoodAnalysisRequest):
-    """
-    Enhanced mood analysis using Chain of Thought, Self-Consistency, and expert validation.
-    """
-    try:
-        print(f"Processing enhanced mood analysis for text length: {len(req.text)}")
-        
-        # Generate embedding
-        print("Generating semantic embedding...")
-        embedding = embed_texts(req.text)
-        print(f"Embedding generated: {len(embedding)} dimensions")
-        
-        # Enhanced mood analysis with multiple techniques
-        print("Performing enhanced mood analysis...")
-        enhanced_analysis = await run_in_threadpool(analyze_mood_enhanced, req.text, embedding)
-        print("Enhanced mood analysis completed")
-        
-        return {
-            "text_snippet": req.text[:200] + "..." if len(req.text) > 200 else req.text,
-            "embedding_dimensions": len(embedding),
-            "enhanced_mood_analysis": enhanced_analysis["mood_analysis"],
-            "quality_verification": enhanced_analysis["verification"],
-            "analysis_method": "Chain of Thought + Self-Consistency + Expert Validation",
-            "analysis_type": "enhanced"
-        }
-    except Exception as e:
-        print(f"Error in enhanced mood analysis: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Enhanced mood analysis failed: {str(e)}")
 
 @mood_router.get("/health")
 def mood_health_check():

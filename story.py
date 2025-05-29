@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import openai
 from dotenv import load_dotenv
 from fastapi.concurrency import run_in_threadpool
+from embedding import preprocess_long_text
 
 load_dotenv()
 

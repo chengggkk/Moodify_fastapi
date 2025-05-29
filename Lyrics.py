@@ -145,9 +145,7 @@ async def process_lyrics_content(url: str) -> str:
         return await format_with_mistral(text)
 
     except requests.RequestException:
-        print(MISTRAL_API_KEY)
-        print(GENIUS_API_KEY)
-        print(BRAVE_API_KEY)
+        print(response.content)
         return "Content extraction failed"
 
 

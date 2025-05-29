@@ -250,8 +250,14 @@ class MusicRecommendationService:
         if html_content:
             html_section = f"\nExtracted Website Content:\n{html_content[:3000]}\n"  # Increased from 2000 to 3000 chars
         
-        system_prompt = """You are a music recommendation expert. Based on the user's request, multiple search results 
-        from different refined queries, and extracted website content, recommend 10-15 songs that match their criteria. 
+        system_prompt = f"""You are a music recommendation expert. Based on the user's request, multiple search results 
+        from different refined queries, and extracted website content, recommend songs that match their criteria.
+
+        IMPORTANT:
+        - 1.if user has limit of amount of songs, ONLY return the amount of the songs, if no specific request, return 10~20 tracks.
+        - 2.if user has specific artist request, ONLY return the artist's tracks.
+        - 3.if user has specific publish year request, ONLY return the tracks of the year.
+        - 4.if user has specific language request, ONLY return the tracks in that language.
         
         Use the diverse search results and website content to find actual song titles and artists. 
         The search was performed using multiple optimized queries to ensure comprehensive coverage.
@@ -261,7 +267,7 @@ class MusicRecommendationService:
         
         Example format:
         [
-            {"title": "Song Name", "artist": "Artist Name"},
+            {"title": "Original Language of the Song Name", "artist": "Original Language of the Artist Name", "album": "Album Name", "publish_year": 2020},
             {"title": "Another Song", "artist": "Another Artist", "album": "Album Name", "publish_year": 2020}
         ]"""
         

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 import asyncio
 import aiohttp
-import yt_dlp
+import subprocess
 import librosa
 import numpy as np
 import tempfile
@@ -12,7 +12,7 @@ import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import json
-import os
+import glob
 
 
 logger = logging.getLogger(__name__)
@@ -99,33 +99,41 @@ async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist:
         logger.error(f"Error searching for {title} by {artist}: {str(e)}")
         return None
 
-def extract_features_from_youtube(url: str) -> Dict:
-    """Extract audio features from YouTube URL using librosa"""
-    temp_audio_path = None
-    
+def download_audio(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Download audio from YouTube URL using subprocess"""
     try:
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
-            temp_audio_path = temp_audio.name
+        command = [
+            "yt-dlp",
+            "--cookies", "cookies.txt",
+            "-x", "--audio-format", "mp3",
+            "--output", f"{output_dir}/%(title)s.%(ext)s",
+            youtube_url
+        ]
         
-        # Download audio
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            'outtmpl': temp_audio_path,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
-        }
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.info(f"Download successful for {youtube_url}")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        
+        # Find the downloaded file
+        mp3_files = glob.glob(os.path.join(output_dir, "*.mp3"))
+        if mp3_files:
+            return mp3_files[0]  # Return the first (and likely only) mp3 file
+        else:
+            logger.error(f"No MP3 file found after download in {output_dir}")
+            return None
+            
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Download failed for {youtube_url}: {e}")
+        logger.error(f"Command output: {e.output}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error downloading {youtube_url}: {str(e)}")
+        return None
+
+def extract_features_from_audio_file(audio_path: str) -> Dict:
+    """Extract audio features from local audio file using librosa"""
+    try:
         # Load audio with librosa
-        y, sr = librosa.load(temp_audio_path, sr=22050, duration=30)  # Limit to 30 seconds
+        y, sr = librosa.load(audio_path, sr=22050, duration=30)  # Limit to 30 seconds
         
         if len(y) == 0:
             raise ValueError("Empty audio file")
@@ -172,16 +180,45 @@ def extract_features_from_youtube(url: str) -> Dict:
         }
         
     except Exception as e:
-        logger.error(f"Error extracting features from {url}: {str(e)}")
+        logger.error(f"Error extracting features from {audio_path}: {str(e)}")
+        raise
+
+def extract_features_from_youtube(url: str) -> Dict:
+    """Extract audio features from YouTube URL by downloading and processing"""
+    temp_dir = None
+    audio_path = None
+    
+    try:
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp()
+        
+        # Download audio using subprocess
+        audio_path = download_audio(url, temp_dir)
+        if not audio_path:
+            raise ValueError("Failed to download audio from YouTube")
+        
+        # Extract features from the downloaded file
+        features = extract_features_from_audio_file(audio_path)
+        
+        return features
+        
+    except Exception as e:
+        logger.error(f"Error processing YouTube URL {url}: {str(e)}")
         raise
     
     finally:
-        # Cleanup temporary file
-        if temp_audio_path and os.path.exists(temp_audio_path):
+        # Cleanup temporary files and directory
+        if temp_dir and os.path.exists(temp_dir):
             try:
-                os.unlink(temp_audio_path)
-            except:
-                pass
+                # Remove all files in temp directory
+                for file in os.listdir(temp_dir):
+                    file_path = os.path.join(temp_dir, file)
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                # Remove the directory
+                os.rmdir(temp_dir)
+            except Exception as cleanup_error:
+                logger.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
 
 async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
     """Process a batch of 3 tracks synchronously"""

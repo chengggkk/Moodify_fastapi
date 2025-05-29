@@ -12,6 +12,8 @@ import os
 import logging
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ class BatchResponse(BaseModel):
     failed: int
 
 # Configuration
-BRAVE_SEARCH_API_KEY = "your_brave_api_key_here"  # Replace with your actual API key
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
 # Thread pool for CPU-intensive audio processing

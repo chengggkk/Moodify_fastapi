@@ -21,6 +21,8 @@ class MusicPrompt(BaseModel):
 class Song(BaseModel):
     title: str
     artist: str
+    album: str = None
+    publish_year: int = None
 
 class MusicResponse(BaseModel):
     songs: List[Song]
@@ -65,7 +67,7 @@ class MusicRecommendationService:
                     
                     Examples:
                     Input: "give me K-drama romantic OST"
-                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST this year"]
+                    Output: ["best K-drama romantic OST", "최고의 로맨틱 OST", "top 10 K-drama OST 2024"]
                     
                     Input: "taylor swift sad songs"
                     Output: ["taylor swift sad songs", "taylor swift heartbreak ballads", "taylor swift emotional songs best"]
@@ -126,10 +128,11 @@ class MusicRecommendationService:
         
         params = {
             "q": query,
-            "count": 8,
+            "count": 15,  # Increased from 8 to 15
             "search_lang": "en",
             "country": "US",
-            "safesearch": "moderate"
+            "safesearch": "moderate",
+            "freshness": "pw"  # Past week for more recent results
         }
         
         try:
@@ -177,7 +180,7 @@ class MusicRecommendationService:
                 unique_urls.append(url)
                 seen_urls.add(url)
         
-        return all_results, unique_urls[:15]  # Limit to top 15 URLs
+        return all_results, unique_urls[:25]  # Increased from 15 to 25 URLs
     
     async def extract_html_content(self, url: str) -> str:
         """Extract and clean HTML content using BeautifulSoup"""
@@ -212,16 +215,17 @@ class MusicRecommendationService:
     
     async def extract_music_info_from_html(self, urls: List[str]) -> str:
         """Extract music-related information from multiple URLs"""
-        # Process first 5 URLs concurrently for speed
+        # Process first 8 URLs concurrently for speed (increased from 5)
         extraction_tasks = [
             self.extract_html_content(url) 
-            for url in urls[:5]
+            for url in urls[:8]
         ]
         
         contents = await asyncio.gather(*extraction_tasks, return_exceptions=True)
         
         extracted_content = []
-        music_keywords = ['song', 'artist', 'album', 'music', 'track', 'singer', 'band', 'OST', 'soundtrack']
+        music_keywords = ['song', 'artist', 'album', 'music', 'track', 'singer', 'band', 'OST', 'soundtrack', 
+                         'lyrics', 'discography', 'release', 'spotify', 'apple music', 'playlist', 'chart']
         
         for content in contents:
             if isinstance(content, str) and content:
@@ -240,43 +244,28 @@ class MusicRecommendationService:
         
         # Prepare search context from multiple query results
         search_context = f"Search queries used: {', '.join(queries_used)}\n\n"
-        for i, result in enumerate(search_results[:10]):  # Use top 10 results
+        for i, result in enumerate(search_results[:15]):  # Increased from 10 to 15 results
             search_context += f"Result {i+1}:\nTitle: {result.get('title', '')}\nSnippet: {result.get('description', '')}\nURL: {result.get('url', '')}\n\n"
         
         # Add HTML content if available
         html_section = ""
         if html_content:
-            html_section = f"\nExtracted Website Content:\n{html_content[:2000]}\n"  # Limit to 2000 chars
+            html_section = f"\nExtracted Website Content:\n{html_content[:3000]}\n"  # Increased from 2000 to 3000 chars
         
-        system_prompt = """You are a music recommendation expert with deep knowledge of global music across genres and decades. Your goal is to recommend 10–15 songs that match the user’s request using detailed reasoning and validation.
-
-You are given:
-1. The user's request (mood, genre, story, vibe, theme, etc.).
-2. Multiple search results derived from refined queries targeting various musical aspects (e.g., emotion, lyrics, historical context).
-3. Extracted content from song lyrics, reviews, playlist curation sites, forums, and other sources.
-
-Follow these steps:
-- **Step 1 (Comprehension):** Understand the user's intent. What mood, style, or theme are they requesting?
-- **Step 2 (Cross-reference):** Analyze the search results and extracted content. Identify recurring song mentions, lyrical themes, or genre tags that align with the user’s intent.
-- **Step 3 (Self-consistency):** Choose songs that are consistently relevant across multiple sources.
-- **Step 4 (Emotion tuning):** Ensure the tone, emotion, or storytelling of the song matches the user's desired theme (e.g., nostalgic, hopeful, dark, energetic).
-- **Step 5 (Validate metadata):** Where possible, confirm the album name and year of publication.
-
-⚠️ Output Constraints:
-- Return ONLY a **valid JSON array** of the songs.
-- Each object must have: 
-  - `"title"` (string),
-  - `"artist"` (string),
-  - `"album"` (string or null),
-  - `"publish year"` (number or null)
-- NO extra text, explanation, or formatting outside the JSON.
-
-✅ Example output:
-[
-  {"title": "Bohemian Rhapsody", "artist": "Queen", "album": "A Night at the Opera", "publish year": 1975},
-  {"title": "Someone Like You", "artist": "Adele", "album": "21", "publish year": 2011},
-  ...
-]"""
+        system_prompt = """You are a music recommendation expert. Based on the user's request, multiple search results 
+        from different refined queries, and extracted website content, recommend 10-15 songs that match their criteria. 
+        
+        Use the diverse search results and website content to find actual song titles and artists. 
+        The search was performed using multiple optimized queries to ensure comprehensive coverage.
+        
+        Return ONLY a valid JSON array with objects containing 'title' and 'artist' fields. 
+        Do not include any additional text or formatting.
+        
+        Example format:
+        [
+            {"title": "Song Name", "artist": "Artist Name"},
+            {"title": "Another Song", "artist": "Another Artist"}
+        ]"""
         
         user_message = f"""User Request: {user_prompt}
 
@@ -305,7 +294,7 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
             
             # Parse JSON response
             songs_data = json.loads(content)
-            songs = [Song(title=song["title"], artist=song["artist"], album=song['album'], publish_year=song['publish year']) for song in songs_data]
+            songs = [Song(title=song["title"], artist=song["artist"]) for song in songs_data]
             return songs
             
         except json.JSONDecodeError as e:
@@ -320,25 +309,25 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
         """Create fallback songs when AI services fail"""
         fallback_songs = {
             "k-drama": [
-                Song(title="You Are My Everything", artist="Gummy"),
-                Song(title="Always", artist="Yoon Mirae"),
-                Song(title="Stay With Me", artist="Chanyeol & Punch"),
-                Song(title="Breath", artist="Lee Hi"),
-                Song(title="Spring Day", artist="BTS")
+                Song(title="You Are My Everything", artist="Gummy", album="Goblin OST", publish_year=2016),
+                Song(title="Always", artist="Yoon Mirae", album="Descendants of the Sun OST", publish_year=2016),
+                Song(title="Stay With Me", artist="Chanyeol & Punch", album="Goblin OST", publish_year=2016),
+                Song(title="Breath", artist="Lee Hi", album="It's Okay to Not Be Okay OST", publish_year=2020),
+                Song(title="Spring Day", artist="BTS", album="You Never Walk Alone", publish_year=2017)
             ],
             "taylor swift": [
-                Song(title="All Too Well", artist="Taylor Swift"),
-                Song(title="Ronan", artist="Taylor Swift"),
-                Song(title="Soon You'll Get Better", artist="Taylor Swift"),
-                Song(title="Death by a Thousand Cuts", artist="Taylor Swift"),
-                Song(title="Sad Beautiful Tragic", artist="Taylor Swift")
+                Song(title="All Too Well", artist="Taylor Swift", album="Red", publish_year=2012),
+                Song(title="Ronan", artist="Taylor Swift", album="Single", publish_year=2012),
+                Song(title="Soon You'll Get Better", artist="Taylor Swift", album="Lover", publish_year=2019),
+                Song(title="Death by a Thousand Cuts", artist="Taylor Swift", album="Lover", publish_year=2019),
+                Song(title="Sad Beautiful Tragic", artist="Taylor Swift", album="Red", publish_year=2012)
             ],
             "chinese": [
-                Song(title="月亮代表我的心", artist="Teresa Teng"),
-                Song(title="童话", artist="Guang Liang"),
-                Song(title="听海", artist="A-Mei"),
-                Song(title="小幸运", artist="Hebe Tien"),
-                Song(title="演员", artist="Xue Zhiqian")
+                Song(title="月亮代表我的心", artist="Teresa Teng", album="島國之情歌第五集", publish_year=1977),
+                Song(title="童话", artist="Guang Liang", album="童話", publish_year=2005),
+                Song(title="听海", artist="A-Mei", album="Bad Boy", publish_year=1997),
+                Song(title="小幸运", artist="Hebe Tien", album="我的少女時代 電影原聲帶", publish_year=2015),
+                Song(title="演员", artist="Xue Zhiqian", album="紳士", publish_year=2015)
             ]
         }
         
@@ -349,11 +338,11 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
         
         # Default fallback
         return [
-            Song(title="Shape of You", artist="Ed Sheeran"),
-            Song(title="Blinding Lights", artist="The Weeknd"),
-            Song(title="Watermelon Sugar", artist="Harry Styles"),
-            Song(title="Good 4 U", artist="Olivia Rodrigo"),
-            Song(title="Levitating", artist="Dua Lipa")
+            Song(title="Shape of You", artist="Ed Sheeran", album="÷", publish_year=2017),
+            Song(title="Blinding Lights", artist="The Weeknd", album="After Hours", publish_year=2020),
+            Song(title="Watermelon Sugar", artist="Harry Styles", album="Fine Line", publish_year=2020),
+            Song(title="Good 4 U", artist="Olivia Rodrigo", album="SOUR", publish_year=2021),
+            Song(title="Levitating", artist="Dua Lipa", album="Future Nostalgia", publish_year=2020)
         ]
     
     async def close(self):

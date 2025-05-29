@@ -261,8 +261,8 @@ class MusicRecommendationService:
         
         Example format:
         [
-            {"title": "Song Name", "artist": "Artist Name"},
-            {"title": "Another Song", "artist": "Another Artist"}
+            {"title": "Song Name", "artist": "Artist Name", "album": "string or null", "publish year": "int or year"},
+            {"title": "Another Song", "artist": "Another Artist" , "album": "string or null", "publish_year": "int or year"}
         ]"""
         
         user_message = f"""User Request: {user_prompt}
@@ -292,7 +292,7 @@ generate a diverse playlist that aligns with the user's prompt in the specified 
             
             # Parse JSON response
             songs_data = json.loads(content)
-            songs = [Song(title=song["title"], artist=song["artist"]) for song in songs_data]
+            songs = [Song(title=song["title"], artist=song["artist"], album=song["album"], publish_year=song["publish_year"]) for song in songs_data]
             return songs
             
         except json.JSONDecodeError as e:

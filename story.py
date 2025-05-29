@@ -61,7 +61,7 @@ async def generate_story_with_openai(lyrics: str, customize: Optional[str] = Non
 
     try:
         response = await run_in_threadpool(
-            openai.ChatCompletion.create,
+            openai.chat.completions.create,
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are a poetic storyteller AI that turns lyrics into stories."},

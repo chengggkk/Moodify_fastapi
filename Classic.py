@@ -346,13 +346,12 @@ class MusicRecommendationService:
         user_message = f"""User Request: {user_prompt}
 
 Language Preference: {detected_language}
-Requested Count: EXACTLY {requested_count} songs (this is critical - count your responses)
+Requested Count: {requested_count} songs
 
 {search_context}
 {html_section}
 
-Generate exactly {requested_count} songs in {detected_language} preference, preserving original language titles and artist names.
-IMPORTANT: Count the songs in your JSON array to ensure it contains exactly {requested_count} entries before responding."""
+Generate exactly {requested_count} songs in {detected_language} preference, preserving original language titles and artist names."""
         
         payload = {
             "model": "gpt-4o-mini",
@@ -374,7 +373,16 @@ IMPORTANT: Count the songs in your JSON array to ensure it contains exactly {req
             # Parse JSON response
             songs_data = json.loads(content)
             
-            # Create Song objects first
+            # Ensure we have exactly the requested number of songs
+            if len(songs_data) > requested_count:
+                songs_data = songs_data[:requested_count]
+            elif len(songs_data) < requested_count:
+                # Pad with fallback songs if needed
+                fallback_songs = self.create_fallback_songs(user_prompt, detected_language)
+                while len(songs_data) < requested_count and fallback_songs:
+                    songs_data.append(fallback_songs.pop(0).__dict__)
+            
+            # Create Song objects
             songs = []
             for song in songs_data:
                 try:
@@ -392,34 +400,15 @@ IMPORTANT: Count the songs in your JSON array to ensure it contains exactly {req
                         artist=str(song.get("artist", "Unknown Artist"))
                     ))
             
-            # Ensure we have exactly the requested number of songs
-            if len(songs) > requested_count:
-                songs = songs[:requested_count]
-                print(f"Trimmed from {len(songs_data)} to {requested_count} songs")
-            elif len(songs) < requested_count:
-                # Pad with fallback songs if needed
-                fallback_songs = self.create_fallback_songs(user_prompt, detected_language)
-                needed_count = requested_count - len(songs)
-                for i in range(min(needed_count, len(fallback_songs))):
-                    songs.append(fallback_songs[i])
-                print(f"Padded from {len(songs_data)} to {len(songs)} songs")
-            
-            # Final safety check - ensure exact count
-            final_songs = songs[:requested_count]
-            print(f"Final song count: {len(final_songs)} (requested: {requested_count})")
-            return final_songs
+            return songs[:requested_count]  # Ensure exact count
             
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}")
             print(f"Response content: {content}")
-            fallback = self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
-            print(f"Returning {len(fallback)} fallback songs")
-            return fallback
+            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
         except Exception as e:
             print(f"OpenAI generation error: {e}")
-            fallback = self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
-            print(f"Returning {len(fallback)} fallback songs")
-            return fallback
+            return self.create_fallback_songs(user_prompt, detected_language)[:requested_count]
     
     def create_fallback_songs(self, prompt: str, detected_language: str) -> List[Song]:
         """Create language-appropriate fallback songs"""

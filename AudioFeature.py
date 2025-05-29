@@ -99,7 +99,34 @@ async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist:
         logger.error(f"Error searching for {title} by {artist}: {str(e)}")
         return None
 
-def download_audio(youtube_url: str, output_dir: str) -> Optional[str]:
+def download_audio_fallback(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Fallback download method - just get the best audio without conversion"""
+    try:
+        command = [
+            "yt-dlp",
+            "--cookies", "cookies.txt",
+            "-f", "bestaudio",
+            "--output", f"{output_dir}/%(title)s.%(ext)s",
+            youtube_url
+        ]
+        
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.info(f"Fallback download successful for {youtube_url}")
+        
+        # Look for any audio files
+        audio_files = []
+        for ext in ["*.webm", "*.m4a", "*.mp3", "*.wav", "*.ogg"]:
+            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
+        
+        if audio_files:
+            return audio_files[0]
+        else:
+            logger.error(f"No audio file found after fallback download in {output_dir}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Fallback download failed for {youtube_url}: {str(e)}")
+        return None
     """Download audio from YouTube URL using subprocess"""
     try:
         command = [
@@ -107,23 +134,45 @@ def download_audio(youtube_url: str, output_dir: str) -> Optional[str]:
             "--cookies", "cookies.txt",
             "-x", "--audio-format", "mp3",
             "--output", f"{output_dir}/%(title)s.%(ext)s",
+            "--prefer-ffmpeg",
+            "--ffmpeg-location", "/usr/bin/ffmpeg",  # Adjust path as needed
             youtube_url
         ]
         
         result = subprocess.run(command, check=True, capture_output=True, text=True)
         logger.info(f"Download successful for {youtube_url}")
+        logger.debug(f"yt-dlp output: {result.stdout}")
         
-        # Find the downloaded file
-        mp3_files = glob.glob(os.path.join(output_dir, "*.mp3"))
-        if mp3_files:
-            return mp3_files[0]  # Return the first (and likely only) mp3 file
+        # Look for both mp3 and other audio files
+        audio_files = []
+        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
+            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
+        
+        if audio_files:
+            audio_file = audio_files[0]
+            logger.info(f"Found audio file: {audio_file}")
+            return audio_file
         else:
-            logger.error(f"No MP3 file found after download in {output_dir}")
+            logger.error(f"No audio file found after download in {output_dir}")
+            # List all files in directory for debugging
+            all_files = os.listdir(output_dir)
+            logger.error(f"Files in directory: {all_files}")
             return None
             
     except subprocess.CalledProcessError as e:
         logger.error(f"Download failed for {youtube_url}: {e}")
-        logger.error(f"Command output: {e.output}")
+        logger.error(f"Command stderr: {e.stderr}")
+        logger.error(f"Command stdout: {e.stdout}")
+        
+        # Try to find any downloaded files even if conversion failed
+        audio_files = []
+        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
+            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
+        
+        if audio_files:
+            logger.info(f"Found audio file despite error: {audio_files[0]}")
+            return audio_files[0]
+        
         return None
     except Exception as e:
         logger.error(f"Unexpected error downloading {youtube_url}: {str(e)}")
@@ -194,6 +243,11 @@ def extract_features_from_youtube(url: str) -> Dict:
         
         # Download audio using subprocess
         audio_path = download_audio(url, temp_dir)
+        if not audio_path:
+            # Try fallback method
+            logger.info(f"Trying fallback download method for {url}")
+            audio_path = download_audio_fallback(url, temp_dir)
+            
         if not audio_path:
             raise ValueError("Failed to download audio from YouTube")
         

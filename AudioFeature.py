@@ -65,7 +65,7 @@ async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist:
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
-            "X-Subscription-Token": BRAVE_SEARCH_API_KEY
+            "X-Subscription-Token": BRAVE_API_KEY
         }
         
         params = {

@@ -99,8 +99,58 @@ async def search_youtube_url(session: aiohttp.ClientSession, title: str, artist:
         logger.error(f"Error searching for {title} by {artist}: {str(e)}")
         return None
 
+def download_audio(youtube_url: str, output_dir: str) -> Optional[str]:
+    """Download audio from YouTube URL using subprocess with MP3 conversion"""
+    try:
+        command = [
+            "yt-dlp",
+            "--cookies", "cookies.txt",
+            "-x", "--audio-format", "mp3",
+            "--output", f"{output_dir}/%(title)s.%(ext)s",
+            "--prefer-ffmpeg",
+            youtube_url
+        ]
+        
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.info(f"Download successful for {youtube_url}")
+        logger.debug(f"yt-dlp output: {result.stdout}")
+        
+        # Look for audio files (prioritize mp3, but accept others)
+        audio_files = []
+        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
+            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
+        
+        if audio_files:
+            audio_file = audio_files[0]
+            logger.info(f"Found audio file: {audio_file}")
+            return audio_file
+        else:
+            logger.error(f"No audio file found after download in {output_dir}")
+            all_files = os.listdir(output_dir)
+            logger.error(f"Files in directory: {all_files}")
+            return None
+            
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Download with conversion failed for {youtube_url}: {e}")
+        logger.error(f"Command stderr: {e.stderr}")
+        logger.error(f"Command stdout: {e.stdout}")
+        
+        # Check if files were downloaded despite conversion error
+        audio_files = []
+        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
+            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
+        
+        if audio_files:
+            logger.info(f"Found audio file despite conversion error: {audio_files[0]}")
+            return audio_files[0]
+        
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error downloading {youtube_url}: {str(e)}")
+        return None
+
 def download_audio_fallback(youtube_url: str, output_dir: str) -> Optional[str]:
-    """Fallback download method - just get the best audio without conversion"""
+    """Fallback download method - get best audio without conversion"""
     try:
         command = [
             "yt-dlp",
@@ -119,6 +169,7 @@ def download_audio_fallback(youtube_url: str, output_dir: str) -> Optional[str]:
             audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
         
         if audio_files:
+            logger.info(f"Fallback found audio file: {audio_files[0]}")
             return audio_files[0]
         else:
             logger.error(f"No audio file found after fallback download in {output_dir}")
@@ -127,61 +178,11 @@ def download_audio_fallback(youtube_url: str, output_dir: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Fallback download failed for {youtube_url}: {str(e)}")
         return None
-    """Download audio from YouTube URL using subprocess"""
-    try:
-        command = [
-            "yt-dlp",
-            "--cookies", "cookies.txt",
-            "-x", "--audio-format", "mp3",
-            "--output", f"{output_dir}/%(title)s.%(ext)s",
-            "--prefer-ffmpeg",
-            "--ffmpeg-location", "/usr/bin/ffmpeg",  # Adjust path as needed
-            youtube_url
-        ]
-        
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        logger.info(f"Download successful for {youtube_url}")
-        logger.debug(f"yt-dlp output: {result.stdout}")
-        
-        # Look for both mp3 and other audio files
-        audio_files = []
-        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
-            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
-        
-        if audio_files:
-            audio_file = audio_files[0]
-            logger.info(f"Found audio file: {audio_file}")
-            return audio_file
-        else:
-            logger.error(f"No audio file found after download in {output_dir}")
-            # List all files in directory for debugging
-            all_files = os.listdir(output_dir)
-            logger.error(f"Files in directory: {all_files}")
-            return None
-            
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Download failed for {youtube_url}: {e}")
-        logger.error(f"Command stderr: {e.stderr}")
-        logger.error(f"Command stdout: {e.stdout}")
-        
-        # Try to find any downloaded files even if conversion failed
-        audio_files = []
-        for ext in ["*.mp3", "*.webm", "*.m4a", "*.wav", "*.ogg"]:
-            audio_files.extend(glob.glob(os.path.join(output_dir, ext)))
-        
-        if audio_files:
-            logger.info(f"Found audio file despite error: {audio_files[0]}")
-            return audio_files[0]
-        
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error downloading {youtube_url}: {str(e)}")
-        return None
 
 def extract_features_from_audio_file(audio_path: str) -> Dict:
     """Extract audio features from local audio file using librosa"""
     try:
-        # Load audio with librosa
+        # Load audio with librosa (librosa can handle various formats)
         y, sr = librosa.load(audio_path, sr=22050, duration=30)  # Limit to 30 seconds
         
         if len(y) == 0:
@@ -235,21 +236,24 @@ def extract_features_from_audio_file(audio_path: str) -> Dict:
 def extract_features_from_youtube(url: str) -> Dict:
     """Extract audio features from YouTube URL by downloading and processing"""
     temp_dir = None
-    audio_path = None
     
     try:
         # Create temporary directory
         temp_dir = tempfile.mkdtemp()
+        logger.info(f"Created temp directory: {temp_dir}")
         
-        # Download audio using subprocess
+        # Try primary download method first
         audio_path = download_audio(url, temp_dir)
+        
+        # If primary method fails, try fallback
         if not audio_path:
-            # Try fallback method
-            logger.info(f"Trying fallback download method for {url}")
+            logger.info(f"Primary download failed, trying fallback for {url}")
             audio_path = download_audio_fallback(url, temp_dir)
             
         if not audio_path:
-            raise ValueError("Failed to download audio from YouTube")
+            raise ValueError("Failed to download audio from YouTube using both methods")
+        
+        logger.info(f"Processing audio file: {audio_path}")
         
         # Extract features from the downloaded file
         features = extract_features_from_audio_file(audio_path)
@@ -269,13 +273,15 @@ def extract_features_from_youtube(url: str) -> Dict:
                     file_path = os.path.join(temp_dir, file)
                     if os.path.isfile(file_path):
                         os.unlink(file_path)
+                        logger.debug(f"Removed temp file: {file_path}")
                 # Remove the directory
                 os.rmdir(temp_dir)
+                logger.debug(f"Removed temp directory: {temp_dir}")
             except Exception as cleanup_error:
                 logger.warning(f"Error cleaning up temp directory {temp_dir}: {cleanup_error}")
 
 async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
-    """Process a batch of 3 tracks synchronously"""
+    """Process a batch of tracks synchronously"""
     results = []
     
     # Step 1: Search for YouTube URLs for all tracks in batch
@@ -311,7 +317,7 @@ async def process_track_batch(tracks: List[TrackRequest]) -> List[TrackResult]:
             
             result.youtube_url = youtube_url
             
-            # Step 3: Extract audio features using thread pool
+            # Extract audio features using thread pool
             loop = asyncio.get_event_loop()
             features_dict = await loop.run_in_executor(
                 executor, 

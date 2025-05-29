@@ -67,7 +67,7 @@ async def generate_story_with_openai(lyrics: str, customize: Optional[str] = Non
                 {"role": "system", "content": "You are a poetic storyteller AI that turns lyrics into stories. Generate story as long as possible"},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=800,
+            max_tokens=2000,
             temperature=0.9,
         )
         return response.choices[0].message.content.strip()

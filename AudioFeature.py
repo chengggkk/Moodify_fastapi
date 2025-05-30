@@ -228,9 +228,15 @@ class AudioFeatureService:
                         print("⚠️ Content too short, using entire content")
                         chunk = html_content
                     else:
-                        divs = html_content.xpath('//div[contains(@class, "dr-ag")]')                        
+                        # Parse the HTML string
+                        tree = html.fromstring(html_content)
 
-                    print(divs)
+                        # Now you can use XPath
+                        divs = tree.xpath('//div[contains(@class, "dr-ag")]')
+
+                        # Print all matched divs' text content
+                    for div in divs:
+                        print(div.text_content())
                     chunk_length = len(chunk)
                     print(f"✅ Extracted chunk: {chunk_length:,} characters")
                     

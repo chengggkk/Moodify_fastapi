@@ -131,8 +131,8 @@ class AudioFeatureService:
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
     async def fetch_and_extract_chunk(self, url: str) -> str:
-        """Step 2: Fetch page and extract 6000-13000 character chunk"""
-        print(f"\n🌐 STEP 2: Fetching page and extracting content chunk")
+        """Step 2: Fetch page and extract structured content using lxml"""
+        print(f"\n🌐 STEP 2: Fetching page and extracting structured content")
         print(f"🌐 URL: {url}")
         
         # Rotate through multiple realistic user agents
@@ -162,7 +162,6 @@ class AudioFeatureService:
             'Upgrade-Insecure-Requests': '1',
             'Connection': 'keep-alive',
             'DNT': '1',
-            # Add referer to look like organic traffic
             'Referer': 'https://www.google.com/'
         }
         
@@ -172,7 +171,7 @@ class AudioFeatureService:
             async with httpx.AsyncClient(
                 headers=headers,
                 follow_redirects=True,
-                timeout=30.0,  # Longer timeout
+                timeout=30.0,
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
             ) as client:
                 try:
@@ -203,65 +202,126 @@ class AudioFeatureService:
                     
                     # Handle encoding properly
                     try:
-                        # Try to decode with the response's declared encoding
                         if response.encoding:
                             html_content = response.content.decode(response.encoding)
                         else:
-                            # Fallback to UTF-8
                             html_content = response.content.decode('utf-8')
                     except UnicodeDecodeError:
                         try:
-                            # Try with latin-1 as fallback
                             html_content = response.content.decode('latin-1')
                         except UnicodeDecodeError:
-                            # Last resort - use response.text with error handling
                             html_content = response.text
                     
                     print(f"📄 HTML content received: {len(html_content):,} characters")
                     print(f"📄 Content encoding: {response.encoding}")
-                    print(f"📄 Response headers: {dict(response.headers)}")
                     
-                    # Extract chunk from the middle part of the HTML content
+                    # Parse HTML and extract structured content using lxml
+                    try:
+                        tree = html.fromstring(html_content)
+                        
+                        # Extract various elements that might contain audio features
+                        extracted_content = []
+                        
+                        # 1. Extract divs with class "dr-ag" (seems to be your target)
+                        dr_ag_divs = tree.xpath('//div[contains(@class, "dr-ag")]')
+                        if dr_ag_divs:
+                            print(f"🔍 Found {len(dr_ag_divs)} div elements with class 'dr-ag'")
+                            for div in dr_ag_divs:
+                                content = div.text_content().strip()
+                                if content:
+                                    extracted_content.append(f"DR-AG DIV: {content}")
+                        
+                        # 2. Extract progress circles and audio feature elements
+                        progress_elements = tree.xpath('//div[contains(@class, "ant-progress")]')
+                        if progress_elements:
+                            print(f"🔍 Found {len(progress_elements)} progress elements")
+                            for elem in progress_elements:
+                                content = elem.text_content().strip()
+                                if content:
+                                    extracted_content.append(f"PROGRESS: {content}")
+                        
+                        # 3. Extract any elements with audio feature keywords
+                        feature_keywords = ['bpm', 'energy', 'danceability', 'happiness', 'valence', 'acousticness', 
+                                        'instrumentalness', 'liveness', 'speechiness', 'loudness', 'key', 'camelot']
+                        
+                        for keyword in feature_keywords:
+                            elements = tree.xpath(f'//*[contains(translate(text(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "{keyword}")]')
+                            for elem in elements:
+                                content = elem.text_content().strip()
+                                if content and len(content) < 200:  # Avoid huge text blocks
+                                    extracted_content.append(f"{keyword.upper()}: {content}")
+                        
+                        # 4. Extract structured data (JSON-LD, meta tags)
+                        json_ld = tree.xpath('//script[@type="application/ld+json"]')
+                        if json_ld:
+                            for script in json_ld:
+                                content = script.text_content().strip()
+                                if content:
+                                    extracted_content.append(f"JSON-LD: {content}")
+                        
+                        # 5. Extract meta tags that might contain audio features
+                        meta_tags = tree.xpath('//meta[@name or @property]')
+                        for meta in meta_tags:
+                            name = meta.get('name') or meta.get('property', '')
+                            content = meta.get('content', '')
+                            if name and content and any(keyword in name.lower() for keyword in feature_keywords):
+                                extracted_content.append(f"META {name}: {content}")
+                        
+                        # 6. Extract any bold text that might contain key info
+                        bold_elements = tree.xpath('//b | //strong')
+                        for elem in bold_elements:
+                            content = elem.text_content().strip()
+                            if content and len(content) < 50:  # Short bold text likely contains key info
+                                extracted_content.append(f"BOLD: {content}")
+                        
+                        # 7. Extract elements with data attributes
+                        data_elements = tree.xpath('//*[@data-*]')
+                        for elem in data_elements:
+                            for attr_name, attr_value in elem.attrib.items():
+                                if attr_name.startswith('data-') and attr_value:
+                                    extracted_content.append(f"DATA-ATTR {attr_name}: {attr_value}")
+                        
+                        # Combine all extracted content
+                        if extracted_content:
+                            structured_content = "\n".join(extracted_content[:100])  # Limit to first 100 items
+                            print(f"🔍 Extracted {len(extracted_content)} structured elements")
+                            print(f"🔍 Structured content preview: {structured_content[:300]}...")
+                            
+                            # If we have good structured content, return it
+                            if len(structured_content) > 500:
+                                return structured_content
+                        
+                        # Fallback: if no structured content found, extract a reasonable chunk
+                        print("⚠️ No structured content found, falling back to HTML chunk extraction")
+                        
+                    except Exception as lxml_error:
+                        print(f"❌ LXML parsing error: {lxml_error}")
+                        print("⚠️ Falling back to HTML chunk extraction")
+                    
+                    # Fallback: Extract chunk from the middle part of the HTML content
                     content_length = len(html_content)
                     
                     if content_length < 6000:
                         print("⚠️ Content too short, using entire content")
                         chunk = html_content
                     else:
-                        # Parse the HTML string
-                        tree = html.fromstring(html_content)
-
-                        # Now you can use XPath
-                        divs = tree.xpath('//div[contains(@class, "dr-ag")]')
-
-                        # Print all matched divs' text content
-                    for div in divs:
-                        print(div.text_content())
-                    chunk_length = len(chunk)
-                    print(f"✅ Extracted chunk: {chunk_length:,} characters")
+                        # Extract a strategic chunk from the middle area where audio features are likely
+                        start_pos = content_length // 4
+                        end_pos = start_pos + min(10000, content_length - start_pos)
+                        chunk = html_content[start_pos:end_pos]
                     
-                    # Debug: Check if chunk is readable
-                    try:
-                        # Try to encode/decode to check if it's valid text
-                        test_encode = chunk.encode('utf-8')
-                        readable_test = chunk[:100].encode('ascii', errors='ignore').decode('ascii')
-                        print(f"🔍 Chunk readability test: {readable_test}")
-                    except Exception as e:
-                        print(f"⚠️ Chunk encoding issue: {e}")
+                    chunk_length = len(chunk)
+                    print(f"📄 Final chunk length: {chunk_length:,} characters")
                     
                     # Quick validation - check if chunk contains likely audio feature indicators
                     indicators = ['progress', 'ant-', 'BPM', 'energy', 'danceability']
                     found_indicators = sum(1 for indicator in indicators if indicator.lower() in chunk.lower())
                     
                     print(f"🔍 Found {found_indicators}/{len(indicators)} audio feature indicators in chunk")
+                    print(f"🔍 Chunk preview (first 200 chars): {chunk[:200]}")
                     
-                    if found_indicators >= 2 or chunk_length >= 6000:
-                        print(f"🔍 Chunk preview (first 200 chars): {chunk[:200]}")
-                        return chunk
-                    else:
-                        print("⚠️ Chunk may not contain audio features, but proceeding anyway")
-                        return chunk
-                        
+                    return chunk
+                            
                 except httpx.TimeoutException:
                     print(f"⏰ Request timed out on attempt {attempt + 1}")
                     if attempt < max_retries - 1:

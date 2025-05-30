@@ -226,7 +226,7 @@ class AudioFeatureService:
                         print("⚠️ Content too short, using entire content")
                         chunk = html_content
                     else:
-                        chunk = html_content[12000:18000]
+                        chunk = html_content[18000:25000]
                         
 
                     print(chunk)

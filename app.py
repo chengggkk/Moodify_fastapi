@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from embedding import embedding_router
 from mood import mood_router
 from story import story_router
-from donut import donut_router
 from Classic import music_router
 from Lyrics import lyrics_router
 from AudioFeature import audio_feature_router

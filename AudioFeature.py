@@ -219,10 +219,7 @@ class AudioFeatureService:
                     
                     print(f"📄 HTML content received: {len(html_content):,} characters")
                     print(f"📄 Content encoding: {response.encoding}")
-                    print(f"📄 Response headers: {dict(response.headers)}")
-                    
-                    # Extract chunk from the middle part of the HTML content
-                    content_length = len(html_content)
+
 
                         # Parse the HTML string
                     tree = html.fromstring(html_content)
@@ -230,11 +227,11 @@ class AudioFeatureService:
                         # Now you can use XPath
                     divs = tree.xpath('//div[contains(@class, "dr-ag")]')
 
-                    print(divs[1])
+                    print(divs)
                     
                     
 
-                    return divs[1]
+                    return divs
 
                         
                 except httpx.TimeoutException:

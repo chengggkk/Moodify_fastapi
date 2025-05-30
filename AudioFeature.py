@@ -21,23 +21,15 @@ class AudioFeatureRequest(BaseModel):
 class AudioFeature(BaseModel):
     title: str
     artist: str
-    key: Optional[str] = None
-    camelot: Optional[str] = None
     bpm: Optional[int] = None
-    duration: Optional[str] = None
-    release_date: Optional[str] = None
-    explicit: Optional[str] = None
-    album: Optional[str] = None
-    label: Optional[str] = None
-    popularity: Optional[int] = None
     energy: Optional[int] = None
     danceability: Optional[int] = None
-    happiness: Optional[int] = None
+    happiness: Optional[int] = None  # or "valence" if from Spotify
     acousticness: Optional[int] = None
     instrumentalness: Optional[int] = None
     liveness: Optional[int] = None
     speechiness: Optional[int] = None
-    loudness: Optional[str] = None
+    loudness: Optional[str] = None  # Consider converting to float (dB)
 
 class AudioFeatureService:
     def __init__(self, brave_api_key: Optional[str], openai_api_key: Optional[str]):

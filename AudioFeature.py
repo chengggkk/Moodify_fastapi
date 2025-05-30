@@ -227,11 +227,11 @@ class AudioFeatureService:
                         # Now you can use XPath
                     divs = tree.xpath('//div[contains(@class, "dr-ag")]')
 
-                    print(divs)
+                    print(divs.text_content())
                     
                     
 
-                    return divs
+                    return divs.text_content()
 
                         
                 except httpx.TimeoutException:

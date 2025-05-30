@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import httpx
-from bs4 import BeautifulSoup
 import re
 from typing import Optional, Dict, Any
 import asyncio
@@ -44,9 +43,10 @@ class AudioFeatureService:
         # Initialize OpenAI client
         if openai_api_key:
             self.openai_client = AsyncOpenAI(api_key=openai_api_key)
+            print("✅ OpenAI client initialized")
         else:
             self.openai_client = None
-            print("⚠️  OpenAI API key not provided - will use traditional parsing only")
+            print("❌ OpenAI API key not provided - this scraper requires OpenAI!")
     
     async def search_tunebat(self, title: str, artist: str) -> str:
         """Search for tunebat results using Brave Search API"""
@@ -139,405 +139,196 @@ class AudioFeatureService:
                     )
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
-    async def extract_with_openai(self, html_content: str, title: str, artist: str) -> Dict[str, Any]:
-        """Use OpenAI to extract audio features from HTML content"""
-        print("🤖 Starting OpenAI extraction...")
+    async def extract_with_openai_full(self, html_content: str, title: str, artist: str) -> Dict[str, Any]:
+        """Use OpenAI to extract audio features from full HTML content"""
+        print("🤖 Starting AI-only extraction...")
         
         if not self.openai_client:
-            print("⚠️  OpenAI client not available, skipping AI extraction")
-            return {}
+            print("❌ OpenAI client not available!")
+            raise HTTPException(status_code=500, detail="OpenAI API key required for this service")
         
         try:
-            # Parse HTML first to extract clean, readable sections
-            soup = BeautifulSoup(html_content, 'html.parser')
+            # Check content length and adjust model accordingly
+            content_length = len(html_content)
+            print(f"📄 HTML content length: {content_length:,} characters")
             
-            # Look specifically for the audio feature sections
-            relevant_text_sections = []
-            
-            # Find Ant Design progress circles and their labels - use flexible approach
-            progress_circles = soup.find_all('div', class_=lambda x: x and 'ant-progress-circle' in ' '.join(x) if isinstance(x, list) else 'ant-progress-circle' in str(x))
-            
-            for circle in progress_circles:
-                # Get the value from the title attribute
-                progress_text_span = circle.find('span', class_=lambda x: x and 'ant-progress-text' in ' '.join(x) if isinstance(x, list) else 'ant-progress-text' in str(x))
-                if progress_text_span:
-                    value = progress_text_span.get('title', '').strip()
-                    
-                    # Find the corresponding label - look for nearby spans with meaningful text
-                    parent_containers = []
-                    current = circle
-                    # Go up the DOM tree to find potential containers
-                    for _ in range(5):  # Check up to 5 levels up
-                        if current.parent:
-                            current = current.parent
-                            parent_containers.append(current)
-                        else:
-                            break
-                    
-                    label = None
-                    for container in parent_containers:
-                        # Look for spans that contain feature names
-                        spans = container.find_all('span')
-                        for span in spans:
-                            text = span.get_text().strip().lower()
-                            if text in ['popularity', 'energy', 'danceability', 'happiness', 'acousticness', 'instrumentalness', 'liveness', 'speechiness', 'loudness']:
-                                label = text
-                                break
-                        if label:
-                            break
-                    
-                    if label and value:
-                        relevant_text_sections.append(f"{label}: {value}")
-            
-            # Look for other musical data patterns in clean text
-            page_text = soup.get_text()
-            
-            # Extract sections that mention musical terms
-            lines = page_text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if any(term in line.lower() for term in ['bpm', 'key', 'major', 'minor', 'camelot', 'tempo']):
-                    if len(line) < 100:  # Skip very long lines
-                        relevant_text_sections.append(line)
-            
-            # Combine relevant sections
-            combined_text = '\n'.join(relevant_text_sections)
-            
-            # If we still don't have good content, look for JSON in script tags
-            if len(combined_text) < 50:
-                script_tags = soup.find_all('script')
-                for script in script_tags:
-                    if script.string:
-                        script_content = script.string
-                        if any(term in script_content.lower() for term in ['bpm', 'key', 'energy', 'danceability']):
-                            # Try to extract JSON objects
-                            json_matches = re.findall(r'\{[^{}]*(?:"(?:bpm|key|energy|danceability|popularity)"[^{}]*)*\}', script_content)
-                            for match in json_matches:
-                                relevant_text_sections.append(match)
-            
-            # Final combined content
-            combined_text = '\n'.join(relevant_text_sections)
-            
-            # Limit to reasonable size
-            if len(combined_text) > 4000:
-                combined_text = combined_text[:4000]
-            
-            print(f"📄 Extracted relevant content ({len(combined_text)} chars):")
-            print(f"📄 Content preview: {combined_text[:500]}...")
-            
-            if not combined_text.strip():
-                print("❌ No relevant content found for OpenAI processing")
-                return {}
+            # GPT-4o-mini can handle up to ~128k tokens (roughly 400k+ characters)
+            # GPT-4o can handle even more but costs more
+            if content_length > 100000:  # 100k chars
+                print("📄 Large content detected, using GPT-4o for better handling")
+                model = "gpt-4o-mini"  # Still using mini as it's very capable
+                max_tokens = 1000
+            else:
+                print("📄 Standard content size, using GPT-4o-mini")
+                model = "gpt-4o-mini"
+                max_tokens = 500
             
             prompt = f"""
-            Extract audio features for "{title}" by "{artist}" from this content:
+You are an expert at extracting audio features from TuneBat HTML pages.
 
-            {combined_text}
+Extract the following audio features for "{title}" by "{artist}" from this COMPLETE HTML page:
 
-            Look for these patterns:
-            1. "popularity: 86" -> popularity: 86
-            2. "energy: 19" -> energy: 19  
-            3. "danceability: 41" -> danceability: 41
-            4. "happiness: 16" -> happiness: 16
-            5. "acousticness: 64" -> acousticness: 64
-            6. "instrumentalness: 0" -> instrumentalness: 0
-            7. "liveness: 21" -> liveness: 21
-            8. "speechiness: 4" -> speechiness: 4
-            9. "loudness: -11 dB" -> loudness: "-11 dB"
-            10. BPM/tempo numbers
-            11. Musical keys (like "C Major", "F# Minor")
-            12. Camelot codes (like "8A", "12B")
+LOOKING FOR:
+- BPM (beats per minute) - integer value
+- Key (musical key like "F# Major", "C Minor", etc.) - string
+- Time Signature (like "4/4", "3/4") - string  
+- Camelot (like "2B", "8A", "12B") - string
+- Energy (0-100) - integer
+- Danceability (0-100) - integer  
+- Happiness/Valence (0-100) - integer
+- Loudness (like "-11 dB") - string with dB
+- Acousticness (0-100) - integer
+- Instrumentalness (0-100) - integer
+- Liveness (0-100) - integer
+- Speechiness (0-100) - integer
+- Popularity (0-100) - integer
 
-            Return only valid JSON:
-            {{
-                "bpm": null,
-                "key": null,
-                "time_signature": null,
-                "camelot": null,
-                "energy": null,
-                "danceability": null,
-                "happiness": null,
-                "loudness": null,
-                "acousticness": null,
-                "instrumentalness": null,
-                "liveness": null,
-                "speechiness": null,
-                "popularity": null
-            }}
-            """
+SEARCH PATTERNS:
+1. Look for Ant Design progress circles with patterns like:
+   - <span class="ant-progress-text" title="86">86</span> followed by <span>popularity</span>
+   - <span class="ant-progress-text" title="19">19</span> followed by <span>energy</span>
+   
+2. Look for text patterns like:
+   - "F# Major · Key · 100 · BPM · 2B · Camelot · 36 · Popularity"
+   - "120 BPM"
+   - "Key: C Major"
+   - "Camelot: 8A"
+   
+3. Look for JSON data in script tags that might contain audio features
+
+4. Look for any table or structured data containing these values
+
+IMPORTANT: Scan the ENTIRE HTML document thoroughly. TuneBat puts the audio feature data in Ant Design components that might appear anywhere in the page.
+
+Return ONLY valid JSON with the extracted values. Use null for missing values:
+
+{{
+    "bpm": null,
+    "key": null,
+    "time_signature": null,
+    "camelot": null,
+    "energy": null,
+    "danceability": null,
+    "happiness": null,
+    "loudness": null,
+    "acousticness": null,
+    "instrumentalness": null,
+    "liveness": null,
+    "speechiness": null,
+    "popularity": null
+}}
+
+FULL HTML CONTENT:
+{html_content}
+"""
             
-            print("🤖 Sending focused request to OpenAI...")
+            print(f"🤖 Sending {content_length:,} characters to OpenAI {model}...")
             response = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=model,
                 messages=[
-                    {"role": "system", "content": "You are a data extraction specialist. Extract only the numeric values and return valid JSON."},
-                    {"role": "user", "content": prompt}
+                    {
+                        "role": "system", 
+                        "content": "You are a precise data extraction specialist. Extract audio features from TuneBat HTML and return only valid JSON. Be thorough - scan the entire HTML document for Ant Design progress circles and other data patterns."
+                    },
+                    {
+                        "role": "user", 
+                        "content": prompt
+                    }
                 ],
-                temperature=0,
-                max_tokens=300
+                temperature=0,  # Deterministic output
+                max_tokens=max_tokens
             )
             
             ai_response = response.choices[0].message.content.strip()
-            print(f"🤖 OpenAI response: {ai_response}")
+            print(f"🤖 OpenAI response ({len(ai_response)} chars): {ai_response}")
             
             # Parse JSON response
             try:
+                # Remove any markdown code blocks if present
                 if "```json" in ai_response:
                     ai_response = ai_response.split("```json")[1].split("```")[0]
                 elif "```" in ai_response:
-                    ai_response = ai_response.split("```")[1].split("```")[0]
+                    # Handle cases where there's just ``` without json
+                    parts = ai_response.split("```")
+                    if len(parts) >= 3:
+                        ai_response = parts[1]
+                    else:
+                        # Try to find JSON in the response
+                        json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+                        if json_match:
+                            ai_response = json_match.group(0)
                 
                 features = json.loads(ai_response)
+                print(f"✅ Successfully parsed JSON: {features}")
                 
-                # Clean the extracted data
+                # Clean and validate the extracted data
                 cleaned_features = {}
                 for key, value in features.items():
                     if value is not None and value != "null" and value != "":
-                        cleaned_features[key] = value
+                        # Additional validation
+                        if key in ['bpm', 'energy', 'danceability', 'happiness', 'acousticness', 'instrumentalness', 'liveness', 'speechiness', 'popularity']:
+                            if isinstance(value, (int, float)) and 0 <= value <= 200:  # Reasonable range
+                                cleaned_features[key] = int(value)
+                            elif isinstance(value, str) and value.isdigit():
+                                val = int(value)
+                                if 0 <= val <= 200:
+                                    cleaned_features[key] = val
+                        elif key in ['key', 'time_signature', 'camelot', 'loudness']:
+                            if isinstance(value, str) and len(value.strip()) > 0:
+                                cleaned_features[key] = value.strip()
                 
-                print(f"✅ OpenAI extracted and cleaned: {cleaned_features}")
+                print(f"✅ Cleaned and validated features: {cleaned_features}")
                 return cleaned_features
                 
             except json.JSONDecodeError as e:
-                print(f"❌ Failed to parse OpenAI JSON: {e}")
-                return {}
+                print(f"❌ Failed to parse OpenAI JSON response: {e}")
+                print(f"❌ Raw response was: {ai_response}")
+                
+                # Try to extract individual values if JSON parsing fails
+                return self.extract_fallback_patterns(ai_response)
                 
         except Exception as e:
             print(f"❌ OpenAI extraction error: {str(e)}")
             return {}
-
-    async def traditional_parsing(self, soup: BeautifulSoup) -> Dict[str, Any]:
-        """Enhanced traditional parsing for Ant Design components"""
-        print("🔧 Starting enhanced traditional parsing...")
+    
+    def extract_fallback_patterns(self, response_text: str) -> Dict[str, Any]:
+        """Fallback extraction from AI response if JSON parsing fails"""
+        print("🔧 Attempting fallback pattern extraction from AI response...")
         features = {}
         
-        # Method 1: Parse Ant Design progress circles with flexible class matching
-        print("🔧 Looking for Ant Design progress circles...")
+        # Try to extract individual values using regex
+        patterns = {
+            'bpm': [r'"bmp":\s*(\d+)', r'bpm["\s:]*(\d+)', r'(\d+)\s*bpm'],
+            'energy': [r'"energy":\s*(\d+)', r'energy["\s:]*(\d+)'],
+            'danceability': [r'"danceability":\s*(\d+)', r'danceability["\s:]*(\d+)'],
+            'happiness': [r'"happiness":\s*(\d+)', r'happiness["\s:]*(\d+)'],
+            'popularity': [r'"popularity":\s*(\d+)', r'popularity["\s:]*(\d+)'],
+            'acousticness': [r'"acousticness":\s*(\d+)', r'acousticness["\s:]*(\d+)'],
+            'instrumentalness': [r'"instrumentalness":\s*(\d+)', r'instrumentalness["\s:]*(\d+)'],
+            'liveness': [r'"liveness":\s*(\d+)', r'liveness["\s:]*(\d+)'],
+            'speechiness': [r'"speechiness":\s*(\d+)', r'speechiness["\s:]*(\d+)'],
+            'key': [r'"key":\s*"([^"]+)"', r'key["\s:]*"?([A-G][#♯♭b]?\s*(?:major|minor))"?'],
+            'camelot': [r'"camelot":\s*"([^"]+)"', r'camelot["\s:]*"?(\d+[AB])"?'],
+            'loudness': [r'"loudness":\s*"([^"]+)"', r'loudness["\s:]*"?(-?\d+(?:\.\d+)?\s*dB)"?']
+        }
         
-        # Use flexible class matching since CSS classes can be dynamic
-        progress_circles = soup.find_all('div', class_=lambda x: x and any('ant-progress-circle' in cls for cls in x) if isinstance(x, list) else 'ant-progress-circle' in str(x))
-        
-        # Also try alternative selectors in case the above doesn't work
-        if not progress_circles:
-            # Try finding by the SVG element which is more stable
-            svg_elements = soup.find_all('svg', class_=lambda x: x and any('ant-progress-circle' in cls for cls in x) if isinstance(x, list) else 'ant-progress-circle' in str(x))
-            progress_circles = [svg.find_parent('div') for svg in svg_elements if svg.find_parent('div')]
-        
-        print(f"🔧 Found {len(progress_circles)} progress circles")
-        
-        if progress_circles:
-            for i, circle in enumerate(progress_circles):
-                print(f"🔧 Processing progress circle {i+1}")
-                
-                # Get the value from the span with title attribute - use flexible class matching
-                progress_text = circle.find('span', class_=lambda x: x and any('ant-progress-text' in cls for cls in x) if isinstance(x, list) else 'ant-progress-text' in str(x))
-                if progress_text:
-                    value_text = progress_text.get('title', '').strip()
-                    print(f"🔧 Found value: '{value_text}'")
-                    
-                    # Find the corresponding label - look for any span that contains text after the progress circle
-                    # Method 1: Try to find parent container and look for any span with text
-                    parent_container = circle.find_parent('div')
-                    label_element = None
-                    
-                    # Look in the immediate parent and siblings for a span with text content
-                    if parent_container:
-                        # Try different approaches to find the label
-                        possible_labels = []
-                        
-                        # Approach 1: Look for spans that contain 'ant-typography' in their class
-                        typography_spans = parent_container.find_all('span', class_=lambda x: x and 'ant-typography' in ' '.join(x) if isinstance(x, list) else 'ant-typography' in str(x))
-                        possible_labels.extend(typography_spans)
-                        
-                        # Approach 2: Look for any span that comes after the progress circle and has meaningful text
-                        all_spans = parent_container.find_all('span')
-                        for span in all_spans:
-                            text = span.get_text().strip().lower()
-                            if text and text in ['popularity', 'energy', 'danceability', 'happiness', 'acousticness', 'instrumentalness', 'liveness', 'speechiness', 'loudness']:
-                                possible_labels.append(span)
-                        
-                        # Approach 3: Look for spans with specific classes that might contain the label
-                        for class_pattern in ['fd89q', 'label', 'text']:
-                            class_spans = parent_container.find_all('span', class_=lambda x: x and class_pattern in ' '.join(x) if isinstance(x, list) else class_pattern in str(x))
-                            possible_labels.extend(class_spans)
-                        
-                        # Take the first valid label we find
-                        for possible_label in possible_labels:
-                            text = possible_label.get_text().strip().lower()
-                            if text and text in ['popularity', 'energy', 'danceability', 'happiness', 'acousticness', 'instrumentalness', 'liveness', 'speechiness', 'loudness']:
-                                label_element = possible_label
-                                break
-                    
-                    if label_element:
-                            label = label_element.get_text().strip().lower()
-                            print(f"🔧 Found label: '{label}'")
-                            
-                            # Map the label to our feature and extract the value
-                            if label == 'popularity' and value_text.isdigit():
-                                features['popularity'] = int(value_text)
-                                print(f"✅ Extracted popularity: {features['popularity']}")
-                            elif label == 'energy' and value_text.isdigit():
-                                features['energy'] = int(value_text)
-                                print(f"✅ Extracted energy: {features['energy']}")
-                            elif label == 'danceability' and value_text.isdigit():
-                                features['danceability'] = int(value_text)
-                                print(f"✅ Extracted danceability: {features['danceability']}")
-                            elif label == 'happiness' and value_text.isdigit():
-                                features['happiness'] = int(value_text)
-                                print(f"✅ Extracted happiness: {features['happiness']}")
-                            elif label == 'acousticness' and value_text.isdigit():
-                                features['acousticness'] = int(value_text)
-                                print(f"✅ Extracted acousticness: {features['acousticness']}")
-                            elif label == 'instrumentalness' and value_text.isdigit():
-                                features['instrumentalness'] = int(value_text)
-                                print(f"✅ Extracted instrumentalness: {features['instrumentalness']}")
-                            elif label == 'liveness' and value_text.isdigit():
-                                features['liveness'] = int(value_text)
-                                print(f"✅ Extracted liveness: {features['liveness']}")
-                            elif label == 'speechiness' and value_text.isdigit():
-                                features['speechiness'] = int(value_text)
-                                print(f"✅ Extracted speechiness: {features['speechiness']}")
-                            elif label == 'loudness' and ('db' in value_text.lower() or 'dB' in value_text):
-                                features['loudness'] = value_text
-                                print(f"✅ Extracted loudness: {features['loudness']}")
-                            else:
-                                print(f"⚠️  Unrecognized label-value pair: '{label}' = '{value_text}'")
-
-        
-        # Additional Method: If no progress circles found or they didn't work, try alternative approaches
-        if not features and not progress_circles:
-            print("🔧 No progress circles found, trying alternative approaches...")
-            
-            # Look for any elements that might contain the audio feature data
-            # Method A: Look for divs that contain both a number and a label
-            all_divs = soup.find_all('div')
-            for div in all_divs:
-                text = div.get_text()
-                # Look for patterns like "86 popularity" or "popularity 86"
-                for feature_name in ['popularity', 'energy', 'danceability', 'happiness', 'acousticness', 'instrumentalness', 'liveness', 'speechiness', 'loudness']:
-                    patterns = [
-                        rf'(\d+)\s+{feature_name}',
-                        rf'{feature_name}\s+(\d+)',
-                        rf'{feature_name}[:\s]+(\d+)',
-                        rf'(\d+)[:\s]+{feature_name}'
-                    ]
-                    for pattern in patterns:
-                        match = re.search(pattern, text, re.IGNORECASE)
-                        if match and not features.get(feature_name):
-                            if feature_name == 'loudness':
-                                # Special handling for loudness (might include dB)
-                                loudness_match = re.search(rf'{feature_name}[:\s]+(-?\d+(?:\.\d+)?\s*dB)', text, re.IGNORECASE)
-                                if loudness_match:
-                                    features[feature_name] = loudness_match.group(1)
-                                    print(f"✅ Extracted {feature_name} from div: {features[feature_name]}")
-                            else:
-                                features[feature_name] = int(match.group(1))
-                                print(f"✅ Extracted {feature_name} from div: {features[feature_name]}")
-                            break
-        
-        # Method 2: Look for other patterns in page text (BPM, key, etc.)
-        print("🔧 Looking for additional musical data patterns...")
-        page_text = soup.get_text()
-        
-        # BPM patterns
-        if not features.get('bpm'):
-            print("🔧 Searching for BPM...")
-            bpm_patterns = [
-                r'(\d+)\s*·\s*BPM',
-                r'BPM\s*·\s*(\d+)', 
-                r'(\d+)\s*BPM',
-                r'BPM[:\s]*(\d+)',
-                r'Tempo[:\s]*(\d+)',
-                r'(\d+)\s*beats per minute'
-            ]
-            
-            for pattern in bpm_patterns:
-                bpm_match = re.search(pattern, page_text, re.IGNORECASE)
-                if bpm_match:
-                    features['bpm'] = int(bpm_match.group(1))
-                    print(f"✅ Extracted BPM: {features['bpm']}")
+        for feature, pattern_list in patterns.items():
+            for pattern in pattern_list:
+                match = re.search(pattern, response_text, re.IGNORECASE)
+                if match:
+                    value = match.group(1)
+                    if feature in ['bmp', 'energy', 'danceability', 'happiness', 'popularity', 'acousticness', 'instrumentalness', 'liveness', 'speechiness']:
+                        if value.isdigit():
+                            features[feature] = int(value)
+                    else:
+                        features[feature] = value
+                    print(f"✅ Extracted {feature}: {features[feature]}")
                     break
         
-        # Key patterns
-        if not features.get('key'):
-            print("🔧 Searching for musical key...")
-            key_patterns = [
-                r'([A-G][#♯♭b]?\s*(?:Major|Minor))\s*·\s*Key',
-                r'Key\s*·\s*([A-G][#♯♭b]?\s*(?:Major|Minor))',
-                r'Key[:\s]*([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)',
-            ]
-            
-            for pattern in key_patterns:
-                key_match = re.search(pattern, page_text, re.IGNORECASE)
-                if key_match:
-                    features['key'] = key_match.group(1).strip()
-                    print(f"✅ Extracted key: {features['key']}")
-                    break
-        
-        # Camelot patterns
-        if not features.get('camelot'):
-            print("🔧 Searching for Camelot key...")
-            camelot_patterns = [
-                r'(\d+[AB])\s*·\s*Camelot',
-                r'Camelot\s*·\s*(\d+[AB])',
-                r'Camelot[:\s]*(\d+[AB])',
-            ]
-            
-            for pattern in camelot_patterns:
-                camelot_match = re.search(pattern, page_text, re.IGNORECASE)
-                if camelot_match:
-                    features['camelot'] = camelot_match.group(1)
-                    print(f"✅ Extracted Camelot: {features['camelot']}")
-                    break
-        
-        # Time signature
-        if not features.get('time_signature'):
-            print("🔧 Searching for time signature...")
-            time_patterns = [
-                r'Time Signature[:\s]*(\d+/\d+)',
-                r'(\d+/\d+)\s*time',
-                r'Time[:\s]*(\d+/\d+)'
-            ]
-            
-            for pattern in time_patterns:
-                time_match = re.search(pattern, page_text, re.IGNORECASE)
-                if time_match:
-                    features['time_signature'] = time_match.group(1)
-                    print(f"✅ Extracted time signature: {features['time_signature']}")
-                    break
-        
-        # Method 3: Look for structured data in script tags
-        if len(features) < 3:  # If we haven't found much, try script tags
-            print("🔧 Searching script tags for JSON data...")
-            script_tags = soup.find_all('script')
-            for script in script_tags:
-                if script.string:
-                    try:
-                        # Look for JSON that might contain our data
-                        if any(term in script.string.lower() for term in ['bpm', 'energy', 'danceability']):
-                            print(f"🔧 Found potentially relevant script content")
-                            # Try to extract JSON objects
-                            json_pattern = r'\{[^{}]*(?:"(?:bpm|key|energy|danceability|popularity)"[^{}]*)+[^{}]*\}'
-                            json_matches = re.findall(json_pattern, script.string)
-                            for match in json_matches:
-                                try:
-                                    data = json.loads(match)
-                                    if isinstance(data, dict):
-                                        # Extract relevant fields
-                                        for key in ['bpm', 'key', 'energy', 'danceability', 'popularity', 'acousticness', 'instrumentalness', 'liveness', 'speechiness']:
-                                            if key in data and not features.get(key):
-                                                features[key] = data[key]
-                                                print(f"✅ Extracted {key} from JSON: {features[key]}")
-                                except json.JSONDecodeError:
-                                    continue
-                    except Exception as e:
-                        continue
-        
-        print(f"🔧 Traditional parsing complete. Final features: {features}")
         return features
     
     async def scrape_tunebat_page(self, url: str, title: str = "", artist: str = "") -> Dict[str, Any]:
-        """Scrape audio features from tunebat page with OpenAI assistance"""
+        """Scrape audio features from tunebat page using AI only"""
         print(f"🌐 Starting to scrape URL: {url}")
         
         if not url:
@@ -586,7 +377,6 @@ class AudioFeatureService:
                 response = await client.get(url)
                 
                 print(f"🌐 Response status: {response.status_code}")
-                print(f"🌐 Response headers: {dict(response.headers)}")
                 
                 if response.status_code == 403:
                     print("❌ Access denied (403)")
@@ -598,168 +388,21 @@ class AudioFeatureService:
                 response.raise_for_status()
                 
                 html_content = response.text
-                print(f"📄 HTML content received: {len(html_content)} characters")
+                print(f"📄 HTML content received: {len(html_content):,} characters")
                 
-                print("🔍 Parsing HTML with BeautifulSoup...")
-                soup = BeautifulSoup(html_content, 'html.parser')
+                # Send directly to OpenAI without any preprocessing
+                print("🤖 Sending full HTML content to OpenAI for extraction...")
+                features = await self.extract_with_openai_full(html_content, title, artist)
                 
-                # Log the page title for verification
-                page_title = soup.find('title')
-                if page_title:
-                    print(f"📄 Page title: {page_title.get_text().strip()}")
-                
-                # Method 1: Use OpenAI for smart extraction
-                print("\n=== METHOD 1: OpenAI Extraction ===")
-                openai_features = await self.extract_with_openai(html_content, title, artist)
-                
-                # Method 2: Traditional parsing as backup
-                print("\n=== METHOD 2: Traditional Parsing ===")
-                traditional_features = await self.traditional_parsing(soup)
-                
-                # Combine results, prioritizing OpenAI but filling gaps with traditional parsing
-                print("\n=== COMBINING RESULTS ===")
-                combined_features = {}
-                
-                # Start with traditional features as base
-                combined_features.update(traditional_features)
-                print(f"🔧 Traditional features: {traditional_features}")
-                
-                # Override/supplement with OpenAI features
-                combined_features.update(openai_features)
-                print(f"🤖 OpenAI features: {openai_features}")
-                print(f"🎯 Final combined features: {combined_features}")
-                
-                return combined_features
+                return features
                 
             except httpx.HTTPError as e:
                 print(f"❌ HTTP error during scraping: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to scrape page: {str(e)}")
     
-    async def traditional_parsing(self, soup: BeautifulSoup) -> Dict[str, Any]:
-        """Traditional BeautifulSoup parsing as backup"""
-        print("🔧 Starting traditional parsing...")
-        features = {}
-        
-        # Method 1: Look for Ant Design progress circles
-        print("🔧 Looking for Ant Design progress circles...")
-        progress_circles = soup.find_all('div', class_='ant-progress-circle')
-        print(f"🔧 Found {len(progress_circles)} progress circles")
-        
-        for i, circle in enumerate(progress_circles):
-            print(f"🔧 Processing progress circle {i+1}")
-            
-            # Find the value in the progress text span
-            progress_text = circle.find('span', class_='ant-progress-text')
-            if progress_text:
-                value_text = progress_text.get('title', '').strip()
-                print(f"🔧 Progress value: '{value_text}'")
-                
-                # Find the corresponding label
-                label_element = circle.find_next('span', class_='ant-typography')
-                if label_element:
-                    label = label_element.get_text().strip().lower()
-                    print(f"🔧 Progress label: '{label}'")
-                    
-                    # Parse the value based on the label
-                    if label == 'popularity' and value_text.isdigit():
-                        features['popularity'] = int(value_text)
-                        print(f"✅ Extracted popularity: {features['popularity']}")
-                    elif label == 'energy' and value_text.isdigit():
-                        features['energy'] = int(value_text)
-                        print(f"✅ Extracted energy: {features['energy']}")
-                    elif label == 'danceability' and value_text.isdigit():
-                        features['danceability'] = int(value_text)
-                        print(f"✅ Extracted danceability: {features['danceability']}")
-                    elif label == 'happiness' and value_text.isdigit():
-                        features['happiness'] = int(value_text)
-                        print(f"✅ Extracted happiness: {features['happiness']}")
-                    elif label == 'acousticness' and value_text.isdigit():
-                        features['acousticness'] = int(value_text)
-                        print(f"✅ Extracted acousticness: {features['acousticness']}")
-                    elif label == 'instrumentalness' and value_text.isdigit():
-                        features['instrumentalness'] = int(value_text)
-                        print(f"✅ Extracted instrumentalness: {features['instrumentalness']}")
-                    elif label == 'liveness' and value_text.isdigit():
-                        features['liveness'] = int(value_text)
-                        print(f"✅ Extracted liveness: {features['liveness']}")
-                    elif label == 'speechiness' and value_text.isdigit():
-                        features['speechiness'] = int(value_text)
-                        print(f"✅ Extracted speechiness: {features['speechiness']}")
-                    elif label == 'loudness' and 'db' in value_text.lower():
-                        features['loudness'] = value_text
-                        print(f"✅ Extracted loudness: {features['loudness']}")
-        
-        # Method 2: Look for standard text patterns
-        print("🔧 Looking for text patterns...")
-        page_text = soup.get_text()
-        
-        # BPM patterns
-        print("🔧 Searching for BPM...")
-        bpm_patterns = [
-            r'(\d+)\s*BPM',
-            r'BPM[:\s]*(\d+)',
-            r'Tempo[:\s]*(\d+)',
-            r'(\d+)\s*beats per minute'
-        ]
-        
-        for pattern in bpm_patterns:
-            bpm_match = re.search(pattern, page_text, re.IGNORECASE)
-            if bpm_match and not features.get('bpm'):
-                features['bpm'] = int(bpm_match.group(1))
-                print(f"✅ Extracted BPM: {features['bpm']}")
-                break
-        
-        # Key patterns
-        print("🔧 Searching for musical key...")
-        key_patterns = [
-            r'Key[:\s]*([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)',
-            r'([A-G][#♯♭b]?)\s*(?:major|minor|maj|min)',
-            r'Key:\s*([A-G][#♯♭b]?)'
-        ]
-        
-        for pattern in key_patterns:
-            key_match = re.search(pattern, page_text, re.IGNORECASE)
-            if key_match and not features.get('key'):
-                features['key'] = key_match.group(1).strip()
-                print(f"✅ Extracted key: {features['key']}")
-                break
-        
-        # Time Signature patterns
-        print("🔧 Searching for time signature...")
-        time_sig_patterns = [
-            r'Time Signature[:\s]*(\d+/\d+)',
-            r'(\d+/\d+)\s*time',
-            r'Time[:\s]*(\d+/\d+)'
-        ]
-        
-        for pattern in time_sig_patterns:
-            time_match = re.search(pattern, page_text, re.IGNORECASE)
-            if time_match and not features.get('time_signature'):
-                features['time_signature'] = time_match.group(1)
-                print(f"✅ Extracted time signature: {features['time_signature']}")
-                break
-        
-        # Camelot Key patterns
-        print("🔧 Searching for Camelot key...")
-        camelot_patterns = [
-            r'Camelot[:\s]*(\d+[AB])',
-            r'(\d+[AB])\s*Camelot',
-            r'Camelot Key[:\s]*(\d+[AB])'
-        ]
-        
-        for pattern in camelot_patterns:
-            camelot_match = re.search(pattern, page_text, re.IGNORECASE)
-            if camelot_match and not features.get('camelot'):
-                features['camelot'] = camelot_match.group(1)
-                print(f"✅ Extracted Camelot: {features['camelot']}")
-                break
-        
-        print(f"🔧 Traditional parsing complete. Found: {features}")
-        return features
-    
     async def get_audio_features(self, title: str, artist: str) -> AudioFeature:
-        """Main method to get audio features with fallback strategies"""
-        print(f"\n🎵 ==> STARTING AUDIO FEATURE EXTRACTION <==")
+        """Main method to get audio features using AI-only approach"""
+        print(f"\n🎵 ==> STARTING AI-ONLY AUDIO FEATURE EXTRACTION <==")
         print(f"🎵 Song: '{title}' by '{artist}'")
         
         features = {}
@@ -783,7 +426,7 @@ class AudioFeatureService:
             # Skip API and go directly to fallback methods
             features = await self.try_direct_tunebat_approach(title, artist)
         
-        print(f"\n🎯 ==> FINAL RESULT <==")
+        print(f"\n🎯 ==> FINAL AI EXTRACTION RESULT <==")
         result = AudioFeature(
             title=title,
             artist=artist,
@@ -793,7 +436,7 @@ class AudioFeatureService:
         return result
     
     async def try_direct_tunebat_approach(self, title: str, artist: str) -> Dict[str, Any]:
-        """Try to construct tunebat URL directly or use DuckDuckGo search"""
+        """Try to construct tunebat URL directly"""
         print("🔧 Trying direct TuneBat approach...")
         
         # Clean the title and artist for URL construction
@@ -820,58 +463,8 @@ class AudioFeatureService:
                 print(f"❌ Direct URL {i+1} failed: {str(e)}")
                 continue
         
-        # If direct URLs don't work, try DuckDuckGo search (no API key required)
-        print("🔄 Falling back to DuckDuckGo search...")
-        return await self.search_with_duckduckgo(title, artist)
-    
-    async def search_with_duckduckgo(self, title: str, artist: str) -> Dict[str, Any]:
-        """Use DuckDuckGo search as fallback (no API key required)"""
-        print("🦆 Starting DuckDuckGo search...")
-        query = f"site:tunebat.com {title} {artist}"
-        print(f"🦆 DuckDuckGo query: '{query}'")
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        async with httpx.AsyncClient(headers=headers, timeout=10.0) as client:
-            try:
-                print("🦆 Making DuckDuckGo API request...")
-                response = await client.get(
-                    "https://api.duckduckgo.com/",
-                    params={
-                        "q": query,
-                        "format": "json",
-                        "no_html": "1",
-                        "skip_disambig": "1"
-                    }
-                )
-                
-                print(f"🦆 DuckDuckGo response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    results = data.get("Results", [])
-                    print(f"🦆 Found {len(results)} DuckDuckGo results")
-                    
-                    # Look for tunebat URLs in results
-                    for i, result in enumerate(results):
-                        url = result.get("FirstURL", "")
-                        print(f"🦆 Result {i+1} URL: {url}")
-                        if "tunebat.com" in url:
-                            print(f"✅ Found TuneBat URL in result {i+1}")
-                            try:
-                                return await self.scrape_tunebat_page(url, title, artist)
-                            except Exception as e:
-                                print(f"❌ Failed to scrape DuckDuckGo result {i+1}: {str(e)}")
-                                continue
-                
-                print("❌ No usable TuneBat URLs found in DuckDuckGo results")
-                return {}
-                
-            except Exception as e:
-                print(f"❌ DuckDuckGo search failed: {str(e)}")
-                return {}
+        print("❌ All direct URLs failed")
+        return {}
 
 # Initialize the service with API keys
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
@@ -884,7 +477,7 @@ async def get_audio_features(
     artist: str = Query(..., description="Artist name")
 ):
     """
-    Get audio features for a song by searching tunebat
+    Get audio features for a song by searching tunebat using AI extraction
     
     - **title**: The song title
     - **artist**: The artist name
@@ -901,7 +494,7 @@ async def get_audio_features(
 @audio_feature_router.post("/search", response_model=AudioFeature)
 async def get_audio_features_post(request: AudioFeatureRequest):
     """
-    Get audio features for a song by searching tunebat (POST method)
+    Get audio features for a song by searching tunebat using AI extraction (POST method)
     """
     try:
         audio_features = await audio_service.get_audio_features(request.title, request.artist)
@@ -916,4 +509,4 @@ async def get_audio_features_post(request: AudioFeatureRequest):
 @audio_feature_router.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "audio_feature_router"}
+    return {"status": "healthy", "service": "audio_feature_router_ai_only"}

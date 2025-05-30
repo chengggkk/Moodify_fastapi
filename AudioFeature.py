@@ -223,41 +223,19 @@ class AudioFeatureService:
                     
                     # Extract chunk from the middle part of the HTML content
                     content_length = len(html_content)
-                    
-                    if content_length < 6000:
-                        print("⚠️ Content too short, using entire content")
-                        chunk = html_content
-                    else:
+
                         # Parse the HTML string
-                        tree = html.fromstring(html_content)
+                    tree = html.fromstring(html_content)
 
                         # Now you can use XPath
-                        divs = tree.xpath('//div[contains(@class, "dr-ag")]')
+                    divs = tree.xpath('//div[contains(@class, "dr-ag")]')
 
                         # Print all matched divs' text content
                     for div in divs:
                         print(div.text_content())
                     
-                    chunk_length = len(chunk)
-                    print(f"✅ Extracted chunk: {chunk_length:,} characters")
                     
-                    # Debug: Check if chunk is readable
-                    try:
-                        # Try to encode/decode to check if it's valid text
-                        test_encode = chunk.encode('utf-8')
-                        readable_test = chunk[:100].encode('ascii', errors='ignore').decode('ascii')
-                        print(f"🔍 Chunk readability test: {readable_test}")
-                    except Exception as e:
-                        print(f"⚠️ Chunk encoding issue: {e}")
-                    
-                    # Quick validation - check if chunk contains likely audio feature indicators
-                    indicators = ['progress', 'ant-', 'BPM', 'energy', 'danceability']
-                    found_indicators = sum(1 for indicator in indicators if indicator.lower() in chunk.lower())
-                    
-                    print(f"🔍 Found {found_indicators}/{len(indicators)} audio feature indicators in chunk")
-                    
-                    if found_indicators >= 2 or chunk_length >= 6000:
-                        print(f"🔍 Chunk preview (first 200 chars): {chunk[:200]}")
+
                         return divs
                     else:
                         print("⚠️ Chunk may not contain audio features, but proceeding anyway")

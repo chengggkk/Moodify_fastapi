@@ -8,6 +8,8 @@ import json
 import random
 import os
 from openai import AsyncOpenAI
+from lxml import html
+
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
 
@@ -226,10 +228,9 @@ class AudioFeatureService:
                         print("⚠️ Content too short, using entire content")
                         chunk = html_content
                     else:
-                        chunk = html_content[27000:34000]
-                        
+                        divs = html_content.xpath('//div[contains(@class, "dr-ag")]')                        
 
-                    print(chunk)
+                    print(divs)
                     chunk_length = len(chunk)
                     print(f"✅ Extracted chunk: {chunk_length:,} characters")
                     

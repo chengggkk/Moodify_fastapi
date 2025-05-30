@@ -36,4 +36,4 @@ ffmpeg-python
 
 # Logging and utilities
 requests
-ytmusicapi
+html

@@ -220,19 +220,17 @@ class AudioFeatureService:
                     print(f"📄 HTML content received: {len(html_content):,} characters")
                     print(f"📄 Content encoding: {response.encoding}")
 
-
-                        # Parse the HTML string
                     tree = html.fromstring(html_content)
 
                         # Now you can use XPath
                     divs = tree.xpath('//div[contains(@class, "dr-ag")]')
 
-                    print(divs.text_content())
-                    
-                    
 
-                    return divs.text_content()
+                    texts = [div.text_content() for div in divs]
+                    all_text = '\n'.join(texts)
 
+                    print(all_text)
+                    return all_text
                         
                 except httpx.TimeoutException:
                     print(f"⏰ Request timed out on attempt {attempt + 1}")

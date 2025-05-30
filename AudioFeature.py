@@ -2,13 +2,15 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import httpx
 import re
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import random
 import os
 from openai import AsyncOpenAI
 from lxml import html
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
@@ -17,6 +19,9 @@ audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"]
 class AudioFeatureRequest(BaseModel):
     title: str
     artist: str
+
+class MultipleAudioFeatureRequest(BaseModel):
+    tracks: List[AudioFeatureRequest]
 
 class AudioFeature(BaseModel):
     title: str
@@ -30,6 +35,13 @@ class AudioFeature(BaseModel):
     liveness: Optional[int] = None
     speechiness: Optional[int] = None
     loudness: Optional[str] = None  # Consider converting to float (dB)
+    error: Optional[str] = None  # To track any errors for individual tracks
+
+class MultipleAudioFeatureResponse(BaseModel):
+    results: List[AudioFeature]
+    total_processed: int
+    successful: int
+    failed: int
 
 class AudioFeatureService:
     def __init__(self, brave_api_key: Optional[str], openai_api_key: Optional[str]):
@@ -214,9 +226,8 @@ class AudioFeatureService:
 
                     tree = html.fromstring(html_content)
 
-                        # Now you can use XPath
+                    # Now you can use XPath
                     divs = tree.xpath('//div[contains(@class, "dr-ag")]')
-
 
                     texts = [div.text_content() for div in divs]
                     all_text = '\n'.join(texts)
@@ -445,6 +456,81 @@ HTML CHUNK:
             print(f"❌ Unexpected error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
+    async def get_single_track_features_safe(self, title: str, artist: str) -> AudioFeature:
+        """Safe wrapper for single track processing with error handling"""
+        try:
+            return await self.get_audio_features(title, artist)
+        except Exception as e:
+            print(f"❌ Error processing '{title}' by '{artist}': {str(e)}")
+            return AudioFeature(
+                title=title,
+                artist=artist,
+                error=str(e)
+            )
+
+    async def get_multiple_audio_features(self, tracks: List[AudioFeatureRequest]) -> MultipleAudioFeatureResponse:
+        """Process multiple tracks concurrently with a limit of 5 simultaneous requests"""
+        print(f"\n🎵 ======= MULTIPLE AUDIO FEATURE EXTRACTION =======")
+        print(f"🎵 Processing {len(tracks)} tracks")
+        print(f"🎵 Max concurrent requests: 5")
+        
+        if len(tracks) > 5:
+            raise HTTPException(
+                status_code=400, 
+                detail="Maximum 5 tracks allowed per request"
+            )
+        
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(5)
+        
+        async def process_with_semaphore(track: AudioFeatureRequest):
+            async with semaphore:
+                return await self.get_single_track_features_safe(track.title, track.artist)
+        
+        # Process all tracks concurrently
+        start_time = asyncio.get_event_loop().time()
+        
+        tasks = [process_with_semaphore(track) for track in tracks]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        end_time = asyncio.get_event_loop().time()
+        total_time = end_time - start_time
+        
+        # Process results and count successes/failures
+        processed_results = []
+        successful = 0
+        failed = 0
+        
+        for result in results:
+            if isinstance(result, Exception):
+                # Handle exceptions that weren't caught by the safe wrapper
+                failed += 1
+                processed_results.append(AudioFeature(
+                    title="Unknown",
+                    artist="Unknown",
+                    error=str(result)
+                ))
+            elif result.error:
+                failed += 1
+                processed_results.append(result)
+            else:
+                successful += 1
+                processed_results.append(result)
+        
+        print(f"\n🎯 ======= BATCH PROCESSING COMPLETE =======")
+        print(f"🎯 Total tracks: {len(tracks)}")
+        print(f"🎯 Successful: {successful}")
+        print(f"🎯 Failed: {failed}")
+        print(f"🎯 Processing time: {total_time:.2f} seconds")
+        print(f"🎯 Average time per track: {total_time/len(tracks):.2f} seconds")
+        
+        return MultipleAudioFeatureResponse(
+            results=processed_results,
+            total_processed=len(tracks),
+            successful=successful,
+            failed=failed
+        )
+
 # Initialize service
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -469,9 +555,20 @@ async def extract_audio_features(
 @audio_feature_router.post("/extract", response_model=AudioFeature)
 async def extract_audio_features_post(request: AudioFeatureRequest):
     """
-    Extract audio features using POST method
+    Extract audio features using POST method for single track
     """
     return await audio_service.get_audio_features(request.title, request.artist)
+
+@audio_feature_router.post("/extract_multiple", response_model=MultipleAudioFeatureResponse)
+async def extract_multiple_audio_features(request: MultipleAudioFeatureRequest):
+    """
+    Extract audio features for multiple tracks (up to 5 tracks simultaneously)
+    
+    - **tracks**: List of tracks with title and artist
+    - Maximum 5 tracks per request
+    - Processes tracks concurrently for faster response
+    """
+    return await audio_service.get_multiple_audio_features(request.tracks)
 
 @audio_feature_router.get("/health")
 async def health_check():
@@ -481,5 +578,6 @@ async def health_check():
         "service": "audio_feature_extractor",
         "process": "brave_search → html_chunk → openai",
         "brave_api": "configured" if audio_service.use_api else "not_configured",
-        "openai_api": "configured" if audio_service.openai_client else "not_configured"
+        "openai_api": "configured" if audio_service.openai_client else "not_configured",
+        "max_concurrent_tracks": 5
     }

@@ -163,70 +163,68 @@ class AudioFeatureService:
                 max_tokens = 500
             
             prompt = f"""
-You are an expert at extracting audio features from TuneBat HTML pages. You must be EXTREMELY PRECISE and extract the EXACT values shown in the HTML.
+            You are an expert at extracting audio features from TuneBat HTML pages. You must be EXTREMELY PRECISE and extract the EXACT values shown in the HTML.
 
-Extract the following audio features for "{title}" by "{artist}" from this COMPLETE HTML page:
+            TASK:
+            Extract the following audio features for "{title}" by "{artist}" from the FULL HTML below. Use the HTML's visual structure — specifically the patterns of feature names and values — to extract data.
 
-CRITICAL PATTERN TO LOOK FOR:
-The HTML contains Ant Design progress circles with this EXACT structure:
-<span class="ant-progress-text" title="VALUE">VALUE</span>
-followed by
-<span class="ant-typography fd89q">FEATURE_NAME</span>
+            💡 IMPORTANT:
+            - The span **value** comes from the span element containing the `title="VALUE"` and the text node also showing that VALUE. This is usually the `<span class="ant-progress-text" title="...">...</span>`, but the class name may change. **Always prioritize `title="..."` for numeric values.**
+            - The **feature name** always appears immediately after the value, inside a `<span>` element with readable text content (e.g. "energy", "popularity", etc.). Ignore its class name — it may vary.
 
-EXAMPLE from the HTML:
-- <span class="ant-progress-text" title="86 ">86 </span> ... <span class="ant-typography fd89q">popularity</span>
-- <span class="ant-progress-text" title="19 ">19 </span> ... <span class="ant-typography fd89q">energy</span>
-- <span class="ant-progress-text" title="41 ">41 </span> ... <span class="ant-typography fd89q">danceability</span>
-- <span class="ant-progress-text" title="16 ">16 </span> ... <span class="ant-typography fd89q">happiness</span>
-- <span class="ant-progress-text" title="64 ">64 </span> ... <span class="ant-typography fd89q">acousticness</span>
-- <span class="ant-progress-text" title="0 ">0 </span> ... <span class="ant-typography fd89q">instrumentalness</span>
-- <span class="ant-progress-text" title="21 ">21 </span> ... <span class="ant-typography fd89q">liveness</span>
-- <span class="ant-progress-text" title="4 ">4 </span> ... <span class="ant-typography fd89q">speechiness</span>
-- <span class="ant-progress-text" title="-11 dB">-11 dB</span> ... <span class="ant-typography fd89q">loudness</span>
+            📌 DATA STRUCTURE TO FOLLOW:
+            The VALUE and its FEATURE NAME are visually paired. You must look for:
+            1. A `<span>` with a `title` attribute for the VALUE (e.g. `title="86 "`).
+            2. A nearby `<span>` with the text of the FEATURE NAME (e.g. "energy").
 
-EXTRACTION RULES:
-1. Find EACH ant-progress-text span and match it with the corresponding feature name
-2. Extract the EXACT numeric value from the title attribute
-3. For loudness, include the "dB" unit
-4. DO NOT make up or estimate values - only extract what is explicitly shown
-5. If a value is not found, return null
+            EXAMPLES FROM HTML:
+            - `<span title="86 ">86 </span>` followed by `<span>popularity</span>`
+            - `<span title="41 ">41 </span>` followed by `<span>danceability</span>`
+            - `<span title="-11 dB">-11 dB</span>` followed by `<span>loudness</span>`
 
-FEATURES TO EXTRACT:
-- BPM (beats per minute) - integer value
-- Key (musical key like "F# Major", "C Minor", etc.) - string
-- Time Signature (like "4/4", "3/4") - string  
-- Camelot (like "2B", "8A", "12B") - string
-- Energy (0-100) - integer
-- Danceability (0-100) - integer  
-- Happiness/Valence (0-100) - integer
-- Loudness (like "-11 dB") - string with dB
-- Acousticness (0-100) - integer
-- Instrumentalness (0-100) - integer
-- Liveness (0-100) - integer
-- Speechiness (0-100) - integer
-- Popularity (0-100) - integer
+            ⚠️ STRICT RULES:
+            1. Only extract values explicitly found in the HTML via a `<span>` with a `title="..."` attribute.
+            2. Match each value to the correct feature name shown next to it.
+            3. For "loudness", retain the "dB" suffix.
+            4. Do not guess or infer values. If something is missing, set it to null.
+            5. The features may appear in any order. Match each feature name and value accurately.
 
-Return ONLY valid JSON with the extracted values. Use null for missing values:
+            🎯 FEATURES TO EXTRACT:
+            - BPM (beats per minute) - integer
+            - Key (musical key like "F# Major", "C Minor", etc.) - string
+            - Time Signature (like "4/4", "3/4") - string  
+            - Camelot (like "2B", "8A", "12B") - string
+            - Energy (0-100) - integer
+            - Danceability (0-100) - integer  
+            - Happiness or Valence (0-100) - integer (accept either label)
+            - Loudness (like "-11 dB") - string with dB
+            - Acousticness (0-100) - integer
+            - Instrumentalness (0-100) - integer
+            - Liveness (0-100) - integer
+            - Speechiness (0-100) - integer
+            - Popularity (0-100) - integer
 
-{{
-    "bpm": null,
-    "key": null,
-    "time_signature": null,
-    "camelot": null,
-    "energy": null,
-    "danceability": null,
-    "happiness": null,
-    "loudness": null,
-    "acousticness": null,
-    "instrumentalness": null,
-    "liveness": null,
-    "speechiness": null,
-    "popularity": null
-}}
+            Return ONLY valid JSON with the extracted values, e.g.:
 
-FULL HTML CONTENT:
-{html_content}
-"""
+            {{
+                "bpm": null,
+                "key": null,
+                "time_signature": null,
+                "camelot": null,
+                "energy": 19,
+                "danceability": 41,
+                "happiness": null,
+                "loudness": null,
+                "acousticness": null,
+                "instrumentalness": null,
+                "liveness": null,
+                "speechiness": null,
+                "popularity": 86
+            }}
+
+            📦 FULL HTML CONTENT:
+            {html_content}
+            """
             
             print(f"🤖 Sending {content_length:,} characters to OpenAI {model}...")
             response = await self.openai_client.chat.completions.create(

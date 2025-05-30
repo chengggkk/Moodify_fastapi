@@ -181,7 +181,7 @@ class AudioFeatureService:
             ) as client:
                 try:
                     # Progressive delay: 3, 5, 8 seconds
-                    delay = 3 + (attempt * 2)
+                    delay = 5 + (attempt * 2)
                     print(f"⏱️ Attempt {attempt + 1}/{max_retries}: Sleeping {delay} seconds to imitate human...")
                     await asyncio.sleep(delay)
                     

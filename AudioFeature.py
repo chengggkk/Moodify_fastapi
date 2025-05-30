@@ -118,7 +118,7 @@ class AudioFeatureService:
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
     async def scrape_tunebat_page(self, url: str) -> Dict[str, Any]:
-        """Scrape audio features from tunebat page with anti-bot protection handling"""
+        """Scrape audio features from tunebat page with proper HTML structure parsing"""
         if not url:
             raise HTTPException(status_code=404, detail="No URL found in search results")
         
@@ -158,7 +158,6 @@ class AudioFeatureService:
                 response = await client.get(url)
                 
                 if response.status_code == 403:
-                    # Try alternative approach with session
                     raise HTTPException(
                         status_code=403, 
                         detail="Access denied by tunebat. Try using a VPN or consider alternative data sources like Spotify Web API."
@@ -171,63 +170,173 @@ class AudioFeatureService:
                 # Extract audio features from tunebat page
                 features = {}
                 
-                # Look for key musical attributes
-                # These selectors might need adjustment based on tunebat's actual HTML structure
+                # Method 1: Look for Ant Design progress circles (based on your paste-2.txt)
+                progress_circles = soup.find_all('div', class_='ant-progress-circle')
                 
-                # BPM
-                bpm_element = soup.find(text=re.compile(r'BPM|Tempo'))
-                if bpm_element:
-                    bpm_parent = bpm_element.parent
-                    bpm_match = re.search(r'(\d+)', bpm_parent.get_text())
-                    if bpm_match:
-                        features['bpm'] = int(bpm_match.group(1))
+                for circle in progress_circles:
+                    # Find the value in the progress text span
+                    progress_text = circle.find('span', class_='ant-progress-text')
+                    if progress_text:
+                        value_text = progress_text.get('title', '').strip()
+                        
+                        # Find the corresponding label
+                        label_element = circle.find_next('span', class_='ant-typography')
+                        if label_element:
+                            label = label_element.get_text().strip().lower()
+                            
+                            # Parse the value based on the label
+                            if label == 'popularity' and value_text.isdigit():
+                                features['popularity'] = int(value_text)
+                            elif label == 'energy' and value_text.isdigit():
+                                features['energy'] = int(value_text)
+                            elif label == 'danceability' and value_text.isdigit():
+                                features['danceability'] = int(value_text)
+                            elif label == 'happiness' and value_text.isdigit():
+                                features['happiness'] = int(value_text)
+                            elif label == 'acousticness' and value_text.isdigit():
+                                features['acousticness'] = int(value_text)
+                            elif label == 'instrumentalness' and value_text.isdigit():
+                                features['instrumentalness'] = int(value_text)
+                            elif label == 'liveness' and value_text.isdigit():
+                                features['liveness'] = int(value_text)
+                            elif label == 'speechiness' and value_text.isdigit():
+                                features['speechiness'] = int(value_text)
+                            elif label == 'loudness' and 'db' in value_text.lower():
+                                features['loudness'] = value_text
                 
-                # Key
-                key_element = soup.find(text=re.compile(r'Key'))
-                if key_element:
-                    key_parent = key_element.parent
-                    key_match = re.search(r'([A-G][#b]?\s*(?:major|minor|maj|min)?)', key_parent.get_text())
-                    if key_match:
-                        features['key'] = key_match.group(1).strip()
-                
-                # Time Signature
-                time_sig_element = soup.find(text=re.compile(r'Time Signature'))
-                if time_sig_element:
-                    time_sig_parent = time_sig_element.parent
-                    time_sig_match = re.search(r'(\d+/\d+)', time_sig_parent.get_text())
-                    if time_sig_match:
-                        features['time_signature'] = time_sig_match.group(1)
-                
-                # Camelot Key
-                camelot_element = soup.find(text=re.compile(r'Camelot'))
-                if camelot_element:
-                    camelot_parent = camelot_element.parent
-                    camelot_match = re.search(r'(\d+[AB])', camelot_parent.get_text())
-                    if camelot_match:
-                        features['camelot'] = camelot_match.group(1)
-                
-                # Additional attributes (these might be percentages or ratings)
-                attribute_patterns = {
-                    'energy': r'Energy.*?(\d+)',
-                    'danceability': r'Danceability.*?(\d+)',
-                    'happiness': r'Happiness.*?(\d+)',
-                    'acousticness': r'Acousticness.*?(\d+)',
-                    'instrumentalness': r'Instrumentalness.*?(\d+)',
-                    'liveness': r'Liveness.*?(\d+)',
-                    'speechiness': r'Speechiness.*?(\d+)',
-                    'popularity': r'Popularity.*?(\d+)'
-                }
+                # Method 2: Look for standard TuneBat layout patterns
+                # BPM - look for various patterns
+                bpm_patterns = [
+                    r'(\d+)\s*BPM',
+                    r'BPM[:\s]*(\d+)',
+                    r'Tempo[:\s]*(\d+)',
+                    r'(\d+)\s*beats per minute'
+                ]
                 
                 page_text = soup.get_text()
-                for attr, pattern in attribute_patterns.items():
-                    match = re.search(pattern, page_text, re.IGNORECASE)
-                    if match:
-                        features[attr] = int(match.group(1))
+                for pattern in bpm_patterns:
+                    bpm_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if bpm_match and not features.get('bpm'):
+                        features['bpm'] = int(bpm_match.group(1))
+                        break
                 
-                # Loudness (might be in dB)
-                loudness_match = re.search(r'Loudness.*?(-?\d+(?:\.\d+)?\s*dB)', page_text, re.IGNORECASE)
-                if loudness_match:
-                    features['loudness'] = loudness_match.group(1)
+                # Key - look for musical keys
+                key_patterns = [
+                    r'Key[:\s]*([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)',
+                    r'([A-G][#♯♭b]?)\s*(?:major|minor|maj|min)',
+                    r'Key:\s*([A-G][#♯♭b]?)'
+                ]
+                
+                for pattern in key_patterns:
+                    key_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if key_match and not features.get('key'):
+                        features['key'] = key_match.group(1).strip()
+                        break
+                
+                # Time Signature
+                time_sig_patterns = [
+                    r'Time Signature[:\s]*(\d+/\d+)',
+                    r'(\d+/\d+)\s*time',
+                    r'Time[:\s]*(\d+/\d+)'
+                ]
+                
+                for pattern in time_sig_patterns:
+                    time_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if time_match and not features.get('time_signature'):
+                        features['time_signature'] = time_match.group(1)
+                        break
+                
+                # Camelot Key
+                camelot_patterns = [
+                    r'Camelot[:\s]*(\d+[AB])',
+                    r'(\d+[AB])\s*Camelot',
+                    r'Camelot Key[:\s]*(\d+[AB])'
+                ]
+                
+                for pattern in camelot_patterns:
+                    camelot_match = re.search(pattern, page_text, re.IGNORECASE)
+                    if camelot_match and not features.get('camelot'):
+                        features['camelot'] = camelot_match.group(1)
+                        break
+                
+                # Method 3: Look for structured data (JSON-LD, microdata, etc.)
+                json_scripts = soup.find_all('script', type='application/ld+json')
+                for script in json_scripts:
+                    try:
+                        data = json.loads(script.string)
+                        # Extract any relevant audio features from structured data
+                        if isinstance(data, dict):
+                            # Look for common schema.org properties
+                            if 'tempo' in data:
+                                features['bpm'] = int(data['tempo'])
+                            if 'musicalKey' in data:
+                                features['key'] = data['musicalKey']
+                    except:
+                        continue
+                
+                # Method 4: Look for table-based data
+                tables = soup.find_all('table')
+                for table in tables:
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        cells = row.find_all(['td', 'th'])
+                        if len(cells) >= 2:
+                            label = cells[0].get_text().strip().lower()
+                            value = cells[1].get_text().strip()
+                            
+                            if 'bpm' in label or 'tempo' in label:
+                                bpm_match = re.search(r'(\d+)', value)
+                                if bpm_match and not features.get('bpm'):
+                                    features['bpm'] = int(bpm_match.group(1))
+                            
+                            elif 'key' in label:
+                                key_match = re.search(r'([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)', value)
+                                if key_match and not features.get('key'):
+                                    features['key'] = key_match.group(1).strip()
+                
+                # Method 5: Look for div/span elements with specific classes or data attributes
+                # Common TuneBat-style selectors
+                selectors_map = {
+                    'bpm': ['.bpm', '.tempo', '[data-bpm]', '.track-bpm'],
+                    'key': ['.key', '.musical-key', '[data-key]', '.track-key'],
+                    'energy': ['.energy', '[data-energy]'],
+                    'danceability': ['.danceability', '[data-danceability]'],
+                    'camelot': ['.camelot', '.camelot-key', '[data-camelot]']
+                }
+                
+                for feature, selectors in selectors_map.items():
+                    if features.get(feature):
+                        continue
+                        
+                    for selector in selectors:
+                        elements = soup.select(selector)
+                        for element in elements:
+                            text = element.get_text().strip()
+                            
+                            if feature == 'bpm':
+                                bpm_match = re.search(r'(\d+)', text)
+                                if bpm_match:
+                                    features['bpm'] = int(bpm_match.group(1))
+                                    break
+                            
+                            elif feature == 'key':
+                                key_match = re.search(r'([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)', text)
+                                if key_match:
+                                    features['key'] = key_match.group(1).strip()
+                                    break
+                            
+                            elif feature in ['energy', 'danceability'] and text.isdigit():
+                                features[feature] = int(text)
+                                break
+                            
+                            elif feature == 'camelot':
+                                camelot_match = re.search(r'(\d+[AB])', text)
+                                if camelot_match:
+                                    features['camelot'] = camelot_match.group(1)
+                                    break
+                        
+                        if features.get(feature):
+                            break
                 
                 return features
                 

@@ -34,12 +34,19 @@ class AudioFeature(BaseModel):
     popularity: Optional[int] = None
 
 class AudioFeatureService:
-    def __init__(self, brave_api_key: str):
+    def __init__(self, brave_api_key: Optional[str]):
         self.brave_api_key = brave_api_key
         self.brave_search_url = "https://api.search.brave.com/res/v1/web/search"
+        self.use_api = brave_api_key is not None and brave_api_key != "YOUR_BRAVE_API_KEY_HERE"
     
     async def search_tunebat(self, title: str, artist: str) -> str:
         """Search for tunebat results using Brave Search API"""
+        if not self.brave_api_key or self.brave_api_key == "YOUR_BRAVE_API_KEY_HERE":
+            raise HTTPException(
+                status_code=500, 
+                detail="Brave Search API key not configured. Please set a valid API key."
+            )
+        
         query = f"tunebat {title} {artist}"
         
         headers = {
@@ -50,7 +57,13 @@ class AudioFeatureService:
         
         params = {
             "q": query,
-            "count": 1,  # We only need the first result
+            "count": 1,
+            "search_lang": "en",
+            "country": "US",
+            "safesearch": "off",
+            "freshness": "",
+            "text_decorations": False,
+            "spellcheck": True
         }
         
         async with httpx.AsyncClient() as client:
@@ -59,8 +72,33 @@ class AudioFeatureService:
                     self.brave_search_url,
                     headers=headers,
                     params=params,
-                    timeout=10.0
+                    timeout=15.0
                 )
+                
+                # Handle specific error codes
+                if response.status_code == 422:
+                    error_detail = "Invalid request parameters or API key issue"
+                    try:
+                        error_json = response.json()
+                        if "message" in error_json:
+                            error_detail = error_json["message"]
+                    except:
+                        pass
+                    raise HTTPException(
+                        status_code=422, 
+                        detail=f"Brave Search API error: {error_detail}. Check your API key and parameters."
+                    )
+                elif response.status_code == 401:
+                    raise HTTPException(
+                        status_code=401, 
+                        detail="Unauthorized: Invalid or expired Brave Search API key"
+                    )
+                elif response.status_code == 429:
+                    raise HTTPException(
+                        status_code=429, 
+                        detail="Rate limit exceeded. Please try again later."
+                    )
+                
                 response.raise_for_status()
                 
                 search_results = response.json()
@@ -72,6 +110,11 @@ class AudioFeatureService:
                 return first_result.get("url", "")
                 
             except httpx.HTTPError as e:
+                if "422" in str(e):
+                    raise HTTPException(
+                        status_code=422, 
+                        detail="Brave Search API configuration error. Please check your API key and subscription status."
+                    )
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
     async def scrape_tunebat_page(self, url: str) -> Dict[str, Any]:
@@ -195,31 +238,93 @@ class AudioFeatureService:
         """Main method to get audio features with fallback strategies"""
         features = {}
         
-        try:
-            # Primary strategy: Search tunebat
-            url = await self.search_tunebat(title, artist)
-            features = await self.scrape_tunebat_page(url)
-            
-        except HTTPException as e:
-            if e.status_code == 403:
-                # Fallback strategy: Try searching for alternative sources
-                try:
-                    features = await self.search_alternative_sources(title, artist)
-                except:
-                    # If all else fails, return basic info with error message
-                    return AudioFeature(
-                        title=title,
-                        artist=artist,
-                        **features  # Will be empty dict if no features found
-                    )
-            else:
-                raise e
+        if self.use_api:
+            try:
+                # Primary strategy: Search tunebat via Brave API
+                url = await self.search_tunebat(title, artist)
+                features = await self.scrape_tunebat_page(url)
+            except HTTPException as e:
+                if e.status_code in [422, 401, 500]:
+                    # Fallback to non-API methods
+                    features = await self.try_direct_tunebat_approach(title, artist)
+                else:
+                    raise e
+        else:
+            # Skip API and go directly to fallback methods
+            features = await self.try_direct_tunebat_approach(title, artist)
         
         return AudioFeature(
             title=title,
             artist=artist,
             **features
         )
+    
+    async def try_direct_tunebat_approach(self, title: str, artist: str) -> Dict[str, Any]:
+        """Try to construct tunebat URL directly or use DuckDuckGo search"""
+        # Clean the title and artist for URL construction
+        clean_title = re.sub(r'[^\w\s-]', '', title).strip()
+        clean_artist = re.sub(r'[^\w\s-]', '', artist).strip()
+        
+        # Try common tunebat URL patterns
+        possible_urls = [
+            f"https://tunebat.com/Info/{clean_title.replace(' ', '-')}-{clean_artist.replace(' ', '-')}",
+            f"https://tunebat.com/Info/{clean_artist.replace(' ', '-')}-{clean_title.replace(' ', '-')}",
+        ]
+        
+        for url in possible_urls:
+            try:
+                features = await self.scrape_tunebat_page(url)
+                if features:  # If we got any features, return them
+                    return features
+            except:
+                continue
+        
+        # If direct URLs don't work, try DuckDuckGo search (no API key required)
+        return await self.search_with_duckduckgo(title, artist)
+    
+    async def search_with_duckduckgo(self, title: str, artist: str) -> Dict[str, Any]:
+        """Use DuckDuckGo search as fallback (no API key required)"""
+        query = f"site:tunebat.com {title} {artist}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        async with httpx.AsyncClient(headers=headers, timeout=10.0) as client:
+            try:
+                # DuckDuckGo instant answer API
+                response = await client.get(
+                    "https://api.duckduckgo.com/",
+                    params={
+                        "q": query,
+                        "format": "json",
+                        "no_html": "1",
+                        "skip_disambig": "1"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Look for tunebat URLs in results
+                    for result in data.get("Results", []):
+                        url = result.get("FirstURL", "")
+                        if "tunebat.com" in url:
+                            try:
+                                return await self.scrape_tunebat_page(url)
+                            except:
+                                continue
+                
+                return {}
+                
+            except:
+                return {}
+    
+    async def search_without_api(self, title: str, artist: str) -> Dict[str, Any]:
+        """Last resort: try to get basic info from other sources"""
+        # This could be expanded to include other music databases
+        # For now, return empty dict
+        return {}
     
     async def search_alternative_sources(self, title: str, artist: str) -> Dict[str, Any]:
         """Search for audio features from alternative sources"""
@@ -273,8 +378,9 @@ class AudioFeatureService:
             except Exception:
                 return {}
 
-# Initialize the service (you'll need to provide your Brave API key)
-# You can get this from environment variables or configuration
+# Initialize the service with fallback options
+# You can get a Brave API key from https://api.search.brave.com/
+# Or set to None to use fallback methods only
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 audio_service = AudioFeatureService(BRAVE_API_KEY)
 

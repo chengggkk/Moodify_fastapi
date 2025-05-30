@@ -208,17 +208,56 @@ class AudioFeatureService:
                     print("🔍 Extracting dr-ag component with BeautifulSoup...")
                     soup = BeautifulSoup(html_content, 'html.parser')
                     
-                    # Find the div with class "dr-ag"
+                    # Try multiple ways to find the dr-ag component
+                    dr_ag_div = None
+                    
+                    # Method 1: Direct class search
                     dr_ag_div = soup.find('div', class_='dr-ag')
+                    if dr_ag_div:
+                        print("✅ Found dr-ag component using direct class search")
+                    
+                    # Method 2: Search in class list (in case there are multiple classes)
+                    if not dr_ag_div:
+                        dr_ag_div = soup.find('div', class_=lambda x: x and 'dr-ag' in x)
+                        if dr_ag_div:
+                            print("✅ Found dr-ag component using class list search")
+                    
+                    # Method 3: Search by partial class name
+                    if not dr_ag_div:
+                        dr_ag_divs = soup.find_all('div', class_=re.compile(r'dr-ag'))
+                        if dr_ag_divs:
+                            dr_ag_div = dr_ag_divs[0]
+                            print("✅ Found dr-ag component using regex search")
+                    
+                    # Method 4: Look for divs containing ant-progress elements (fallback)
+                    if not dr_ag_div:
+                        print("🔍 Searching for div containing ant-progress elements...")
+                        potential_divs = soup.find_all('div')
+                        for div in potential_divs:
+                            if div.find('div', class_=re.compile(r'ant-progress')):
+                                # Check if this div contains multiple progress circles
+                                progress_count = len(div.find_all('div', class_=re.compile(r'ant-progress')))
+                                if progress_count >= 5:  # Should have at least 5 audio features
+                                    dr_ag_div = div
+                                    print(f"✅ Found container with {progress_count} progress circles")
+                                    break
                     
                     if dr_ag_div:
                         component_html = str(dr_ag_div)
-                        print(f"✅ Found dr-ag component: {len(component_html)} characters")
-                        print(f"🔍 Component preview: {component_html[:300]}...")
-                        return component_html
-                    else:
-                        print("❌ No dr-ag component found")
-                        raise HTTPException(status_code=404, detail="No audio feature component found on the page")
+                        print(f"✅ Successfully extracted component: {len(component_html)} characters")
+                        
+                        # Quick validation - check if it contains expected audio features
+                        feature_count = len(re.findall(r'ant-progress-text.*?title="(\d+|[^"]*dB)"', component_html))
+                        print(f"🔍 Found {feature_count} audio feature values in component")
+                        
+                        if feature_count >= 5:  # Should have at least 5 features
+                            print(f"🔍 Component preview: {component_html[:300]}...")
+                            return component_html
+                        else:
+                            print("⚠️ Component found but doesn't contain enough audio features")
+                    
+                    print("❌ No suitable dr-ag component found")
+                    raise HTTPException(status_code=404, detail="No audio feature component found on the page")
                         
                 except httpx.TimeoutException:
                     print(f"⏰ Request timed out on attempt {attempt + 1}")

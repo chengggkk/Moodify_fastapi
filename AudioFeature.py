@@ -226,42 +226,8 @@ class AudioFeatureService:
                         print("⚠️ Content too short, using entire content")
                         chunk = html_content
                     else:
-                        # Find a good starting position (around 1/4 into the content)
-                        # This usually skips headers and navigation but catches the main content
-                        start_position = 0
+                        chunk = html_content[12000:18000]
                         
-                        # Try to find a good chunk that likely contains audio features
-                        # Look for keywords that indicate we're in the right section
-                        keywords = ['progress', 'ant-', 'dr-ag', 'audio', 'feature', 'BPM', 'key', 'energy']
-                        
-                        best_start = start_position
-                        best_score = 0
-                        
-                        # Search within a reasonable range for the best starting position
-                        search_range = min(content_length // 2, 5000)
-                        
-                        for offset in range(0, search_range, 500):
-                            test_pos = start_position + offset
-                            if test_pos + 13000 > content_length:
-                                break
-                                
-                            test_chunk = html_content[test_pos:test_pos + 13000]
-                            score = sum(test_chunk.lower().count(kw.lower()) for kw in keywords)
-                            
-                            if score > best_score:
-                                best_score = score
-                                best_start = test_pos
-                        
-                        # Extract the chunk
-                        end_position = min(best_start , content_length)
-                        chunk = html_content[6000:12000]
-                        
-                        # Ensure we have at least 6000 characters
-                        if len(chunk) < 6000 and best_start > 0:
-                            # Expand backwards if needed
-                            actual_start = max(0, end_position - 13000)
-                            chunk = html_content[actual_start:end_position]
-
 
                     print(chunk)
                     chunk_length = len(chunk)

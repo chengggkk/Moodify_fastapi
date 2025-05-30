@@ -163,10 +163,9 @@ class AudioFeatureService:
             timeout=30.0
         ) as client:
             try:
-                # Random delay to appear human-like
-                delay = random.uniform(1, 3)
-                print(f"⏱️ Waiting {delay:.2f} seconds...")
-                await asyncio.sleep(delay)
+                # Simple sleep to imitate human behavior
+                print("⏱️ Sleeping 3 seconds to imitate human...")
+                await asyncio.sleep(3)
                 
                 print("🌐 Fetching page...")
                 response = await client.get(url)
@@ -174,8 +173,8 @@ class AudioFeatureService:
                 print(f"🌐 Response status: {response.status_code}")
                 
                 if response.status_code == 403:
-                    print("❌ Access denied (403)")
-                    raise HTTPException(status_code=403, detail="Access denied by TuneBat")
+                    print("❌ Access denied (403) - TuneBat is blocking requests")
+                    raise HTTPException(status_code=403, detail="TuneBat is blocking requests. The site may have anti-bot protection.")
                 
                 response.raise_for_status()
                 
@@ -196,13 +195,7 @@ class AudioFeatureService:
                     return component_html
                 else:
                     print("❌ No dr-ag component found")
-                    # Try to find any div that might contain audio features
-                    progress_divs = soup.find_all('div', class_=re.compile(r'ant-progress'))
-                    if progress_divs:
-                        print(f"⚠️ Found {len(progress_divs)} progress components, using full page")
-                        return html_content
-                    else:
-                        raise HTTPException(status_code=404, detail="No audio feature component found")
+                    raise HTTPException(status_code=404, detail="No audio feature component found on the page")
                         
             except httpx.HTTPError as e:
                 print(f"❌ HTTP error during page fetch: {str(e)}")

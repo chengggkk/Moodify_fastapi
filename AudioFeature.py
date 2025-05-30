@@ -153,10 +153,9 @@ class AudioFeatureService:
             print(f"📄 HTML content length: {content_length:,} characters")
             
             # GPT-4o-mini can handle up to ~128k tokens (roughly 400k+ characters)
-            # GPT-4o can handle even more but costs more
             if content_length > 100000:  # 100k chars
                 print("📄 Large content detected, using GPT-4o for better handling")
-                model = "gpt-4o-mini"  # Still using mini as it's very capable
+                model = "gpt-4o-mini"
                 max_tokens = 1000
             else:
                 print("📄 Standard content size, using GPT-4o-mini")
@@ -164,11 +163,35 @@ class AudioFeatureService:
                 max_tokens = 500
             
             prompt = f"""
-You are an expert at extracting audio features from TuneBat HTML pages.
+You are an expert at extracting audio features from TuneBat HTML pages. You must be EXTREMELY PRECISE and extract the EXACT values shown in the HTML.
 
 Extract the following audio features for "{title}" by "{artist}" from this COMPLETE HTML page:
 
-LOOKING FOR:
+CRITICAL PATTERN TO LOOK FOR:
+The HTML contains Ant Design progress circles with this EXACT structure:
+<span class="ant-progress-text" title="VALUE">VALUE</span>
+followed by
+<span class="ant-typography fd89q">FEATURE_NAME</span>
+
+EXAMPLE from the HTML:
+- <span class="ant-progress-text" title="86 ">86 </span> ... <span class="ant-typography fd89q">popularity</span>
+- <span class="ant-progress-text" title="19 ">19 </span> ... <span class="ant-typography fd89q">energy</span>
+- <span class="ant-progress-text" title="41 ">41 </span> ... <span class="ant-typography fd89q">danceability</span>
+- <span class="ant-progress-text" title="16 ">16 </span> ... <span class="ant-typography fd89q">happiness</span>
+- <span class="ant-progress-text" title="64 ">64 </span> ... <span class="ant-typography fd89q">acousticness</span>
+- <span class="ant-progress-text" title="0 ">0 </span> ... <span class="ant-typography fd89q">instrumentalness</span>
+- <span class="ant-progress-text" title="21 ">21 </span> ... <span class="ant-typography fd89q">liveness</span>
+- <span class="ant-progress-text" title="4 ">4 </span> ... <span class="ant-typography fd89q">speechiness</span>
+- <span class="ant-progress-text" title="-11 dB">-11 dB</span> ... <span class="ant-typography fd89q">loudness</span>
+
+EXTRACTION RULES:
+1. Find EACH ant-progress-text span and match it with the corresponding feature name
+2. Extract the EXACT numeric value from the title attribute
+3. For loudness, include the "dB" unit
+4. DO NOT make up or estimate values - only extract what is explicitly shown
+5. If a value is not found, return null
+
+FEATURES TO EXTRACT:
 - BPM (beats per minute) - integer value
 - Key (musical key like "F# Major", "C Minor", etc.) - string
 - Time Signature (like "4/4", "3/4") - string  
@@ -182,23 +205,6 @@ LOOKING FOR:
 - Liveness (0-100) - integer
 - Speechiness (0-100) - integer
 - Popularity (0-100) - integer
-
-SEARCH PATTERNS:
-1. Look for Ant Design progress circles with patterns like:
-   - <span class="ant-progress-text" title="86">86</span> followed by <span>popularity</span>
-   - <span class="ant-progress-text" title="19">19</span> followed by <span>energy</span>
-   
-2. Look for text patterns like:
-   - "F# Major · Key · 100 · BPM · 2B · Camelot · 36 · Popularity"
-   - "120 BPM"
-   - "Key: C Major"
-   - "Camelot: 8A"
-   
-3. Look for JSON data in script tags that might contain audio features
-
-4. Look for any table or structured data containing these values
-
-IMPORTANT: Scan the ENTIRE HTML document thoroughly. TuneBat puts the audio feature data in Ant Design components that might appear anywhere in the page.
 
 Return ONLY valid JSON with the extracted values. Use null for missing values:
 
@@ -228,7 +234,7 @@ FULL HTML CONTENT:
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are a precise data extraction specialist. Extract audio features from TuneBat HTML and return only valid JSON. Be thorough - scan the entire HTML document for Ant Design progress circles and other data patterns."
+                        "content": "You are a precise data extraction specialist. Extract audio features from TuneBat HTML by finding ant-progress-text spans and their corresponding feature names. Return only valid JSON with EXACT values from the HTML."
                     },
                     {
                         "role": "user", 
@@ -298,7 +304,7 @@ FULL HTML CONTENT:
         
         # Try to extract individual values using regex
         patterns = {
-            'bpm': [r'"bmp":\s*(\d+)', r'bpm["\s:]*(\d+)', r'(\d+)\s*bpm'],
+            'bpm': [r'"bpm":\s*(\d+)', r'bpm["\s:]*(\d+)', r'(\d+)\s*bpm'],
             'energy': [r'"energy":\s*(\d+)', r'energy["\s:]*(\d+)'],
             'danceability': [r'"danceability":\s*(\d+)', r'danceability["\s:]*(\d+)'],
             'happiness': [r'"happiness":\s*(\d+)', r'happiness["\s:]*(\d+)'],
@@ -317,7 +323,7 @@ FULL HTML CONTENT:
                 match = re.search(pattern, response_text, re.IGNORECASE)
                 if match:
                     value = match.group(1)
-                    if feature in ['bmp', 'energy', 'danceability', 'happiness', 'popularity', 'acousticness', 'instrumentalness', 'liveness', 'speechiness']:
+                    if feature in ['bpm', 'energy', 'danceability', 'happiness', 'popularity', 'acousticness', 'instrumentalness', 'liveness', 'speechiness']:
                         if value.isdigit():
                             features[feature] = int(value)
                     else:

@@ -8,7 +8,6 @@ import json
 import random
 import os
 from openai import AsyncOpenAI
-from bs4 import BeautifulSoup
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
 
@@ -129,9 +128,9 @@ class AudioFeatureService:
                 print(f"❌ HTTP error during search: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
-    async def fetch_and_extract_component(self, url: str) -> str:
-        """Step 2: Fetch page and extract dr-ag component using BeautifulSoup"""
-        print(f"\n🌐 STEP 2: Fetching page and extracting dr-ag component")
+    async def fetch_and_extract_chunk(self, url: str) -> str:
+        """Step 2: Fetch page and extract 6000-13000 character chunk"""
+        print(f"\n🌐 STEP 2: Fetching page and extracting content chunk")
         print(f"🌐 URL: {url}")
         
         # Rotate through multiple realistic user agents
@@ -204,60 +203,65 @@ class AudioFeatureService:
                     html_content = response.text
                     print(f"📄 HTML content received: {len(html_content):,} characters")
                     
-                    # Extract dr-ag component using BeautifulSoup
-                    print("🔍 Extracting dr-ag component with BeautifulSoup...")
-                    soup = BeautifulSoup(html_content, 'html.parser')
+                    # Extract chunk from the middle part of the HTML content
+                    content_length = len(html_content)
                     
-                    # Try multiple ways to find the dr-ag component
-                    dr_ag_div = None
-                    
-                    # Method 1: Direct class search
-                    dr_ag_div = soup.find('div', class_='dr-ag')
-                    if dr_ag_div:
-                        print("✅ Found dr-ag component using direct class search")
-                    
-                    # Method 2: Search in class list (in case there are multiple classes)
-                    if not dr_ag_div:
-                        dr_ag_div = soup.find('div', class_=lambda x: x and 'dr-ag' in x)
-                        if dr_ag_div:
-                            print("✅ Found dr-ag component using class list search")
-                    
-                    # Method 3: Search by partial class name
-                    if not dr_ag_div:
-                        dr_ag_divs = soup.find_all('div', class_=re.compile(r'dr-ag'))
-                        if dr_ag_divs:
-                            dr_ag_div = dr_ag_divs[0]
-                            print("✅ Found dr-ag component using regex search")
-                    
-                    # Method 4: Look for divs containing ant-progress elements (fallback)
-                    if not dr_ag_div:
-                        print("🔍 Searching for div containing ant-progress elements...")
-                        potential_divs = soup.find_all('div')
-                        for div in potential_divs:
-                            if div.find('div', class_=re.compile(r'ant-progress')):
-                                # Check if this div contains multiple progress circles
-                                progress_count = len(div.find_all('div', class_=re.compile(r'ant-progress')))
-                                if progress_count >= 5:  # Should have at least 5 audio features
-                                    dr_ag_div = div
-                                    print(f"✅ Found container with {progress_count} progress circles")
-                                    break
-                    
-                    if dr_ag_div:
-                        component_html = str(dr_ag_div)
-                        print(f"✅ Successfully extracted component: {len(component_html)} characters")
+                    if content_length < 6000:
+                        print("⚠️ Content too short, using entire content")
+                        chunk = html_content
+                    else:
+                        # Find a good starting position (around 1/4 into the content)
+                        # This usually skips headers and navigation but catches the main content
+                        start_position = content_length // 4
                         
-                        # Quick validation - check if it contains expected audio features
-                        feature_count = len(re.findall(r'ant-progress-text.*?title="(\d+|[^"]*dB)"', component_html))
-                        print(f"🔍 Found {feature_count} audio feature values in component")
+                        # Try to find a good chunk that likely contains audio features
+                        # Look for keywords that indicate we're in the right section
+                        keywords = ['progress', 'ant-', 'dr-ag', 'audio', 'feature', 'BPM', 'key', 'energy']
                         
-                        if feature_count >= 5:  # Should have at least 5 features
-                            print(f"🔍 Component preview: {component_html[:300]}...")
-                            return component_html
-                        else:
-                            print("⚠️ Component found but doesn't contain enough audio features")
+                        best_start = start_position
+                        best_score = 0
+                        
+                        # Search within a reasonable range for the best starting position
+                        search_range = min(content_length // 2, 5000)
+                        
+                        for offset in range(0, search_range, 500):
+                            test_pos = start_position + offset
+                            if test_pos + 13000 > content_length:
+                                break
+                                
+                            test_chunk = html_content[test_pos:test_pos + 13000]
+                            score = sum(test_chunk.lower().count(kw.lower()) for kw in keywords)
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_start = test_pos
+                        
+                        # Extract the chunk
+                        end_position = min(best_start + 13000, content_length)
+                        chunk = html_content[best_start:end_position]
+                        
+                        # Ensure we have at least 6000 characters
+                        if len(chunk) < 6000 and best_start > 0:
+                            # Expand backwards if needed
+                            actual_start = max(0, end_position - 13000)
+                            chunk = html_content[actual_start:end_position]
                     
-                    print("❌ No suitable dr-ag component found")
-                    raise HTTPException(status_code=404, detail="No audio feature component found on the page")
+                    print(chunk)
+                    chunk_length = len(chunk)
+                    print(f"✅ Extracted chunk: {chunk_length:,} characters")
+                    
+                    # Quick validation - check if chunk contains likely audio feature indicators
+                    indicators = ['progress', 'ant-', 'BPM', 'energy', 'danceability']
+                    found_indicators = sum(1 for indicator in indicators if indicator.lower() in chunk.lower())
+                    
+                    print(f"🔍 Found {found_indicators}/{len(indicators)} audio feature indicators in chunk")
+                    
+                    if found_indicators >= 2 or chunk_length >= 6000:
+                        print(f"🔍 Chunk preview: {chunk[:200]}...")
+                        return chunk
+                    else:
+                        print("⚠️ Chunk may not contain audio features, but proceeding anyway")
+                        return chunk
                         
                 except httpx.TimeoutException:
                     print(f"⏰ Request timed out on attempt {attempt + 1}")
@@ -278,28 +282,28 @@ class AudioFeatureService:
         # This shouldn't be reached, but just in case
         raise HTTPException(status_code=500, detail="Unexpected error in fetch loop")
     
-    async def extract_with_openai(self, component_html: str, title: str, artist: str) -> Dict[str, Any]:
-        """Step 3: Extract audio features from component using OpenAI"""
-        print(f"\n🤖 STEP 3: OpenAI extraction from component")
+    async def extract_with_openai(self, html_chunk: str, title: str, artist: str) -> Dict[str, Any]:
+        """Step 3: Extract audio features from HTML chunk using OpenAI"""
+        print(f"\n🤖 STEP 3: OpenAI extraction from HTML chunk")
         
         if not self.openai_client:
             print("❌ OpenAI client not available!")
             raise HTTPException(status_code=500, detail="OpenAI API key required")
         
-        if not component_html:
-            print("❌ No component HTML provided")
+        if not html_chunk:
+            print("❌ No HTML chunk provided")
             return {}
         
         try:
-            component_length = len(component_html)
-            print(f"📄 Component HTML length: {component_length:,} characters")
+            chunk_length = len(html_chunk)
+            print(f"📄 HTML chunk length: {chunk_length:,} characters")
             
             prompt = f"""
-You are an expert at extracting audio features from TuneBat HTML components. Extract ALL available data from this dr-ag component.
+You are an expert at extracting audio features from TuneBat HTML content. Extract ALL available data from this HTML chunk.
 
 SONG: "{title}" by "{artist}"
 
-EXTRACT THESE ELEMENTS:
+EXTRACT THESE ELEMENTS FROM THE HTML:
 
 **MUSICAL INFORMATION:**
 - Key (e.g., "G Major", "C# Minor")
@@ -324,32 +328,36 @@ EXTRACT THESE ELEMENTS:
 - Speechiness
 - Loudness (e.g., "-7 dB")
 
-EXTRACTION PATTERNS TO LOOK FOR:
+COMMON PATTERNS TO LOOK FOR:
 
-1. **Ant Design Progress Circles:**
-   <span class="ant-progress-text" title="VALUE">VALUE</span>
-   <span class="ant-typography fd89q">FEATURE_NAME</span>
+1. **Progress Circle Values:**
+   - ant-progress-text with title or data attributes
+   - Numbers followed by feature names like "Energy", "Danceability"
+   - Percentage values in spans or divs
 
 2. **Bold Text Patterns:**
-   **G Major** (key)
-   **9B** (camelot)  
-   **137** (BPM)
-   **4:30** (duration)
+   - **G Major** (key)
+   - **9B** (camelot)  
+   - **137** (BPM)
+   - **4:30** (duration)
 
-3. **Label Patterns:**
-   Release Date:** July 29, 2003**
-   Explicit:** No**
-   Album:** 葉惠美**
-   Label: **Universal Music Taiwan (JVR)**
+3. **Structured Data:**
+   - JSON-LD or data attributes
+   - Meta tags with audio features
+   - Structured lists or tables
 
 4. **Text Content:**
-   Look for any text that contains musical keys, camelots, BPM values, etc.
+   - Release Date: July 29, 2003
+   - Album: Album Name
+   - Label: Record Label
+   - Key signatures, BPM values, duration timestamps
 
 IMPORTANT RULES:
 - Extract EXACT values only - do not estimate or guess
 - For missing values, return null
-- Pay attention to bold text markers (**text**)
-- Look for both English and non-English text (albums may be in other languages)
+- Look for both visible text and HTML attributes/data
+- Audio feature values should be integers 0-100 (except BPM and loudness)
+- Pay attention to HTML structure and class names
 
 Return ONLY valid JSON:
 
@@ -373,17 +381,17 @@ Return ONLY valid JSON:
     "loudness": null
 }}
 
-COMPONENT HTML:
-{component_html}
+HTML CHUNK:
+{html_chunk}
 """
             
-            print(f"🤖 Sending {component_length:,} characters to OpenAI...")
+            print(f"🤖 Sending {chunk_length:,} characters to OpenAI...")
             response = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "system", 
-                        "content": "You are a precise data extraction specialist. Extract audio features and metadata from TuneBat HTML components. Return only valid JSON with exact values found in the HTML."
+                        "content": "You are a precise data extraction specialist. Extract audio features and metadata from TuneBat HTML content. Return only valid JSON with exact values found in the HTML."
                     },
                     {
                         "role": "user", 
@@ -443,17 +451,17 @@ COMPONENT HTML:
         """Main method: 3-step process to get audio features"""
         print(f"\n🎵 ======= AUDIO FEATURE EXTRACTION =======")
         print(f"🎵 Song: '{title}' by '{artist}'")
-        print(f"🎵 Process: Brave Search → BeautifulSoup → OpenAI")
+        print(f"🎵 Process: Brave Search → HTML Chunk → OpenAI")
         
         try:
             # Step 1: Brave Search
             url = await self.brave_search_tunebat(title, artist)
             
-            # Step 2: Fetch page and extract component
-            component_html = await self.fetch_and_extract_component(url)
+            # Step 2: Fetch page and extract chunk
+            html_chunk = await self.fetch_and_extract_chunk(url)
             
             # Step 3: OpenAI extraction
-            features = await self.extract_with_openai(component_html, title, artist)
+            features = await self.extract_with_openai(html_chunk, title, artist)
             
             # Create result
             result = AudioFeature(
@@ -489,7 +497,7 @@ async def extract_audio_features(
     """
     Extract audio features using 3-step process:
     1. Brave Search for TuneBat page
-    2. BeautifulSoup extract dr-ag component  
+    2. Extract 6000-13000 char HTML chunk
     3. OpenAI extract all elements
     
     - **title**: The song title
@@ -510,7 +518,7 @@ async def health_check():
     return {
         "status": "healthy", 
         "service": "audio_feature_extractor",
-        "process": "brave_search → beautifulsoup → openai",
+        "process": "brave_search → html_chunk → openai",
         "brave_api": "configured" if audio_service.use_api else "not_configured",
         "openai_api": "configured" if audio_service.openai_client else "not_configured"
     }

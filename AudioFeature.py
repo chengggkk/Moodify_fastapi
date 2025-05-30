@@ -134,72 +134,110 @@ class AudioFeatureService:
         print(f"\n🌐 STEP 2: Fetching page and extracting dr-ag component")
         print(f"🌐 URL: {url}")
         
+        # Rotate through multiple realistic user agents
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0'
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         ]
         
         selected_ua = random.choice(user_agents)
         print(f"🌐 Using User-Agent: {selected_ua[:50]}...")
         
+        # More realistic browser headers to avoid detection
         headers = {
             'User-Agent': selected_ua,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
+            'Accept-Charset': 'UTF-8',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0'
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
+            'Connection': 'keep-alive',
+            'DNT': '1',
+            # Add referer to look like organic traffic
+            'Referer': 'https://www.google.com/'
         }
         
-        async with httpx.AsyncClient(
-            headers=headers,
-            follow_redirects=True,
-            timeout=30.0
-        ) as client:
-            try:
-                # Simple sleep to imitate human behavior
-                print("⏱️ Sleeping 3 seconds to imitate human...")
-                await asyncio.sleep(3)
-                
-                print("🌐 Fetching page...")
-                response = await client.get(url)
-                
-                print(f"🌐 Response status: {response.status_code}")
-                
-                if response.status_code == 403:
-                    print("❌ Access denied (403) - TuneBat is blocking requests")
-                    raise HTTPException(status_code=403, detail="TuneBat is blocking requests. The site may have anti-bot protection.")
-                
-                response.raise_for_status()
-                
-                html_content = response.text
-                print(f"📄 HTML content received: {len(html_content):,} characters")
-                
-                # Extract dr-ag component using BeautifulSoup
-                print("🔍 Extracting dr-ag component with BeautifulSoup...")
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # Find the div with class "dr-ag"
-                dr_ag_div = soup.find('div', class_='dr-ag')
-                
-                if dr_ag_div:
-                    component_html = str(dr_ag_div)
-                    print(f"✅ Found dr-ag component: {len(component_html)} characters")
-                    print(f"🔍 Component preview: {component_html[:300]}...")
-                    return component_html
-                else:
-                    print("❌ No dr-ag component found")
-                    raise HTTPException(status_code=404, detail="No audio feature component found on the page")
+        # Use longer timeout and retry mechanism
+        max_retries = 3
+        for attempt in range(max_retries):
+            async with httpx.AsyncClient(
+                headers=headers,
+                follow_redirects=True,
+                timeout=30.0,  # Longer timeout
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            ) as client:
+                try:
+                    # Progressive delay: 3, 5, 8 seconds
+                    delay = 3 + (attempt * 2)
+                    print(f"⏱️ Attempt {attempt + 1}/{max_retries}: Sleeping {delay} seconds to imitate human...")
+                    await asyncio.sleep(delay)
+                    
+                    print(f"🌐 Making HTTP request (attempt {attempt + 1})...")
+                    response = await client.get(url)
+                    
+                    print(f"🌐 Response status: {response.status_code}")
+                    
+                    if response.status_code == 403:
+                        print(f"❌ Access denied (403) on attempt {attempt + 1}")
+                        if attempt < max_retries - 1:
+                            print(f"🔄 Retrying in {delay + 5} seconds...")
+                            await asyncio.sleep(delay + 5)
+                            continue
+                        else:
+                            print("❌ All attempts failed - TuneBat is blocking requests")
+                            raise HTTPException(
+                                status_code=403, 
+                                detail="TuneBat is blocking requests. The site may have anti-bot protection. Try again later or use a VPN."
+                            )
+                    
+                    response.raise_for_status()
+                    
+                    html_content = response.text
+                    print(f"📄 HTML content received: {len(html_content):,} characters")
+                    
+                    # Extract dr-ag component using BeautifulSoup
+                    print("🔍 Extracting dr-ag component with BeautifulSoup...")
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    # Find the div with class "dr-ag"
+                    dr_ag_div = soup.find('div', class_='dr-ag')
+                    
+                    if dr_ag_div:
+                        component_html = str(dr_ag_div)
+                        print(f"✅ Found dr-ag component: {len(component_html)} characters")
+                        print(f"🔍 Component preview: {component_html[:300]}...")
+                        return component_html
+                    else:
+                        print("❌ No dr-ag component found")
+                        raise HTTPException(status_code=404, detail="No audio feature component found on the page")
                         
-            except httpx.HTTPError as e:
-                print(f"❌ HTTP error during page fetch: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Failed to fetch page: {str(e)}")
+                except httpx.TimeoutException:
+                    print(f"⏰ Request timed out on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        print("🔄 Retrying...")
+                        continue
+                    else:
+                        raise HTTPException(status_code=408, detail="Request timed out after multiple attempts")
+                
+                except httpx.HTTPError as e:
+                    print(f"❌ HTTP error on attempt {attempt + 1}: {str(e)}")
+                    if attempt < max_retries - 1:
+                        print("🔄 Retrying...")
+                        continue
+                    else:
+                        raise HTTPException(status_code=500, detail=f"Failed to fetch page after {max_retries} attempts: {str(e)}")
+        
+        # This shouldn't be reached, but just in case
+        raise HTTPException(status_code=500, detail="Unexpected error in fetch loop")
     
     async def extract_with_openai(self, component_html: str, title: str, artist: str) -> Dict[str, Any]:
         """Step 3: Extract audio features from component using OpenAI"""

@@ -228,7 +228,7 @@ class AudioFeatureService:
                     else:
                         # Find a good starting position (around 1/4 into the content)
                         # This usually skips headers and navigation but catches the main content
-                        start_position = content_length // 4
+                        start_position = 0
                         
                         # Try to find a good chunk that likely contains audio features
                         # Look for keywords that indicate we're in the right section
@@ -253,8 +253,8 @@ class AudioFeatureService:
                                 best_start = test_pos
                         
                         # Extract the chunk
-                        end_position = min(best_start + 13000, content_length)
-                        chunk = html_content[best_start:end_position]
+                        end_position = min(best_start , content_length)
+                        chunk = html_content[0:6000]
                         
                         # Ensure we have at least 6000 characters
                         if len(chunk) < 6000 and best_start > 0:

@@ -148,9 +148,8 @@ class AudioFeatureService:
         # More realistic browser headers to avoid detection
         headers = {
             'User-Agent': selected_ua,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
             'Accept-Charset': 'UTF-8',
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache',
@@ -200,8 +199,25 @@ class AudioFeatureService:
                     
                     response.raise_for_status()
                     
-                    html_content = response.text
+                    # Handle encoding properly
+                    try:
+                        # Try to decode with the response's declared encoding
+                        if response.encoding:
+                            html_content = response.content.decode(response.encoding)
+                        else:
+                            # Fallback to UTF-8
+                            html_content = response.content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            # Try with latin-1 as fallback
+                            html_content = response.content.decode('latin-1')
+                        except UnicodeDecodeError:
+                            # Last resort - use response.text with error handling
+                            html_content = response.text
+                    
                     print(f"📄 HTML content received: {len(html_content):,} characters")
+                    print(f"📄 Content encoding: {response.encoding}")
+                    print(f"📄 Response headers: {dict(response.headers)}")
                     
                     # Extract chunk from the middle part of the HTML content
                     content_length = len(html_content)
@@ -245,10 +261,20 @@ class AudioFeatureService:
                             # Expand backwards if needed
                             actual_start = max(0, end_position - 13000)
                             chunk = html_content[actual_start:end_position]
-                    
+
+
                     print(chunk)
                     chunk_length = len(chunk)
                     print(f"✅ Extracted chunk: {chunk_length:,} characters")
+                    
+                    # Debug: Check if chunk is readable
+                    try:
+                        # Try to encode/decode to check if it's valid text
+                        test_encode = chunk.encode('utf-8')
+                        readable_test = chunk[:100].encode('ascii', errors='ignore').decode('ascii')
+                        print(f"🔍 Chunk readability test: {readable_test}")
+                    except Exception as e:
+                        print(f"⚠️ Chunk encoding issue: {e}")
                     
                     # Quick validation - check if chunk contains likely audio feature indicators
                     indicators = ['progress', 'ant-', 'BPM', 'energy', 'danceability']
@@ -257,7 +283,7 @@ class AudioFeatureService:
                     print(f"🔍 Found {found_indicators}/{len(indicators)} audio feature indicators in chunk")
                     
                     if found_indicators >= 2 or chunk_length >= 6000:
-                        print(f"🔍 Chunk preview: {chunk[:200]}...")
+                        print(f"🔍 Chunk preview (first 200 chars): {chunk[:200]}")
                         return chunk
                     else:
                         print("⚠️ Chunk may not contain audio features, but proceeding anyway")

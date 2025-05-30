@@ -230,16 +230,12 @@ class AudioFeatureService:
                         # Now you can use XPath
                     divs = tree.xpath('//div[contains(@class, "dr-ag")]')
 
-                        # Print all matched divs' text content
-                    for div in divs:
-                        print(div.text_content())
+                    print(divs[1])
                     
                     
 
-                        return divs
-                    else:
-                        print("⚠️ Chunk may not contain audio features, but proceeding anyway")
-                        return divs
+                    return divs[1]
+
                         
                 except httpx.TimeoutException:
                     print(f"⏰ Request timed out on attempt {attempt + 1}")

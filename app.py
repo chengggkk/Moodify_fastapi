@@ -18,7 +18,6 @@ app = FastAPI(
 app.include_router(embedding_router)
 app.include_router(mood_router)
 app.include_router(story_router)
-app.include_router(donut_router)
 app.include_router(music_router)
 app.include_router(lyrics_router)
 app.include_router(audio_feature_router)

@@ -5,7 +5,8 @@ from bs4 import BeautifulSoup
 import re
 from typing import Optional, Dict, Any
 import asyncio
-import os
+import json
+import random
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
 
@@ -73,13 +74,52 @@ class AudioFeatureService:
                 raise HTTPException(status_code=500, detail=f"Search API error: {str(e)}")
     
     async def scrape_tunebat_page(self, url: str) -> Dict[str, Any]:
-        """Scrape audio features from tunebat page"""
+        """Scrape audio features from tunebat page with anti-bot protection handling"""
         if not url:
             raise HTTPException(status_code=404, detail="No URL found in search results")
         
-        async with httpx.AsyncClient() as client:
+        # Multiple user agents to rotate
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15'
+        ]
+        
+        # Headers to mimic a real browser request
+        headers = {
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
+            'Referer': 'https://www.google.com/'  # Appear to come from Google
+        }
+        
+        async with httpx.AsyncClient(
+            headers=headers,
+            follow_redirects=True,
+            timeout=20.0
+        ) as client:
             try:
-                response = await client.get(url, timeout=10.0)
+                # Add random delay to appear more human-like
+                await asyncio.sleep(random.uniform(1, 3))
+                
+                response = await client.get(url)
+                
+                if response.status_code == 403:
+                    # Try alternative approach with session
+                    raise HTTPException(
+                        status_code=403, 
+                        detail="Access denied by tunebat. Try using a VPN or consider alternative data sources like Spotify Web API."
+                    )
+                
                 response.raise_for_status()
                 
                 soup = BeautifulSoup(response.content, 'html.parser')
@@ -151,23 +191,90 @@ class AudioFeatureService:
                 raise HTTPException(status_code=500, detail=f"Failed to scrape page: {str(e)}")
     
     async def get_audio_features(self, title: str, artist: str) -> AudioFeature:
-        """Main method to get audio features"""
-        # Step 1: Search for tunebat URL
-        url = await self.search_tunebat(title, artist)
+        """Main method to get audio features with fallback strategies"""
+        features = {}
         
-        # Step 2: Scrape the page for audio features
-        features = await self.scrape_tunebat_page(url)
+        try:
+            # Primary strategy: Search tunebat
+            url = await self.search_tunebat(title, artist)
+            features = await self.scrape_tunebat_page(url)
+            
+        except HTTPException as e:
+            if e.status_code == 403:
+                # Fallback strategy: Try searching for alternative sources
+                try:
+                    features = await self.search_alternative_sources(title, artist)
+                except:
+                    # If all else fails, return basic info with error message
+                    return AudioFeature(
+                        title=title,
+                        artist=artist,
+                        **features  # Will be empty dict if no features found
+                    )
+            else:
+                raise e
         
-        # Step 3: Return structured audio features
         return AudioFeature(
             title=title,
             artist=artist,
             **features
         )
+    
+    async def search_alternative_sources(self, title: str, artist: str) -> Dict[str, Any]:
+        """Search for audio features from alternative sources"""
+        query = f'"{title}" "{artist}" BPM key tempo'
+        
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "X-Subscription-Token": self.brave_api_key
+        }
+        
+        params = {
+            "q": query,
+            "count": 5,  # Get more results to find good sources
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.get(
+                    self.brave_search_url,
+                    headers=headers,
+                    params=params,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                
+                search_results = response.json()
+                features = {}
+                
+                # Look through search results for music data
+                for result in search_results.get("web", {}).get("results", []):
+                    snippet = result.get("description", "")
+                    title_text = result.get("title", "")
+                    
+                    # Try to extract BPM from snippets
+                    bpm_match = re.search(r'(\d+)\s*BPM', snippet + " " + title_text, re.IGNORECASE)
+                    if bpm_match and not features.get('bpm'):
+                        features['bpm'] = int(bpm_match.group(1))
+                    
+                    # Try to extract key
+                    key_match = re.search(r'Key[:\s]*([A-G][#♯♭b]?(?:\s*(?:major|minor|maj|min))?)', snippet + " " + title_text, re.IGNORECASE)
+                    if key_match and not features.get('key'):
+                        features['key'] = key_match.group(1).strip()
+                    
+                    # If we found basic info, that's good enough for fallback
+                    if features.get('bpm') and features.get('key'):
+                        break
+                
+                return features
+                
+            except Exception:
+                return {}
 
 # Initialize the service (you'll need to provide your Brave API key)
 # You can get this from environment variables or configuration
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+BRAVE_API_KEY = "YOUR_BRAVE_API_KEY_HERE"  # Replace with actual API key
 audio_service = AudioFeatureService(BRAVE_API_KEY)
 
 @audio_feature_router.get("/search", response_model=AudioFeature)

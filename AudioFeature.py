@@ -254,7 +254,7 @@ class AudioFeatureService:
                         
                         # Extract the chunk
                         end_position = min(best_start , content_length)
-                        chunk = html_content[0:6000]
+                        chunk = html_content[6000:12000]
                         
                         # Ensure we have at least 6000 characters
                         if len(chunk) < 6000 and best_start > 0:

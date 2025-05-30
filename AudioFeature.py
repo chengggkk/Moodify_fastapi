@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 import asyncio
 import json
 import random
+import os
 
 audio_feature_router = APIRouter(prefix="/audio_feature", tags=["audio_feature"])
 
@@ -274,7 +275,7 @@ class AudioFeatureService:
 
 # Initialize the service (you'll need to provide your Brave API key)
 # You can get this from environment variables or configuration
-BRAVE_API_KEY = "YOUR_BRAVE_API_KEY_HERE"  # Replace with actual API key
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 audio_service = AudioFeatureService(BRAVE_API_KEY)
 
 @audio_feature_router.get("/search", response_model=AudioFeature)

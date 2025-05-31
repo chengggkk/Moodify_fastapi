@@ -37,4 +37,4 @@ ffmpeg-python
 # Logging and utilities
 requests
 lxml
-cloudscraper
+lyricsgenius

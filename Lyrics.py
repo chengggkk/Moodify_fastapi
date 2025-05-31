@@ -181,6 +181,7 @@ async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
             }
         ]
         
+        print(messages)
         formatted = await call_openai(messages)
         return formatted.strip()
         

@@ -49,6 +49,8 @@ def calculate_similarity(str1: str, str2: str) -> float:
     """Calculate similarity between two strings"""
     return SequenceMatcher(None, str1, str2).ratio()
 
+
+
 def get_session_with_retries():
     """Create a requests session with retry strategy and better headers"""
     session = requests.Session()

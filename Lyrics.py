@@ -3,8 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 import openai
 import os
-from lxml import html, etree
-import re
+from lxml import html
 from datetime import datetime
 
 # Initialize router
@@ -42,108 +41,161 @@ async def call_openai(messages, temperature=0.3):
         return response.choices[0].message.content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
 def extract_genius_lyrics(html_content: str) -> str:
-    """Simplified and more accurate Genius lyrics extraction"""
+    """Extract lyrics using lxml - looking for div id=lyrics or data-lyrics-container"""
     try:
-        # First, look for the main lyrics container
-        container_pattern = r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>(?:\s*</div>)*'
-        container_match = re.search(container_pattern, html_content, re.DOTALL | re.IGNORECASE)
+        # Parse HTML with lxml
+        doc = html.fromstring(html_content)
         
-        if not container_match:
-            return ""
+        # Method 1: Look for div with id="lyrics"
+        lyrics_div = doc.xpath('//div[@id="lyrics"]')
+        if lyrics_div:
+            lyrics_text = get_text_content(lyrics_div[0])
+            if lyrics_text and len(lyrics_text.strip()) > 50:
+                return lyrics_text.strip()
         
-        container_content = container_match.group(1)
+        # Method 2: Look for div with data-lyrics-container="true"
+        lyrics_containers = doc.xpath('//div[@data-lyrics-container="true"]')
+        if lyrics_containers:
+            lyrics_text = get_text_content(lyrics_containers[0])
+            if lyrics_text and len(lyrics_text.strip()) > 50:
+                return lyrics_text.strip()
         
-        # Extract lyrics from <p> tags within the container
-        # This captures the main lyrics content
-        p_pattern = r'<p[^>]*>(.*?)</p>'
-        p_matches = re.findall(p_pattern, container_content, re.DOTALL | re.IGNORECASE)
-        
-        if not p_matches:
-            return ""
-        
-        # Process the lyrics content
-        lyrics_parts = []
-        for p_content in p_matches:
-            # Clean the content
-            cleaned = clean_lyrics_content(p_content)
-            if cleaned and len(cleaned.strip()) > 20:  # Only add substantial content
-                lyrics_parts.append(cleaned)
-        
-        # Join all parts
-        result = '\n\n'.join(lyrics_parts)
-        
-        # Final cleanup
-        result = re.sub(r'\n{3,}', '\n\n', result)
-        return result.strip()
-        
-    except Exception as e:
-        print(f"Error in simplified extraction: {str(e)}")
-        return ""
-
-def clean_lyrics_content(content: str) -> str:
-    """Clean individual lyrics content"""
-    # Remove links but keep their text content
-    content = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', content, flags=re.DOTALL)
-    
-    # Remove spans but keep their text content  
-    content = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', content, flags=re.DOTALL)
-    
-    # Convert <br> tags to newlines
-    content = re.sub(r'<br\s*/?>', '\n', content, flags=re.IGNORECASE)
-    
-    # Remove any remaining HTML tags
-    content = re.sub(r'<[^>]+>', '', content)
-    
-    # Decode HTML entities
-    content = re.sub(r'&quot;', '"', content)
-    content = re.sub(r'&#x27;|&#39;', "'", content)
-    content = re.sub(r'&amp;', '&', content)
-    content = re.sub(r'&nbsp;', ' ', content)
-    content = re.sub(r'&lt;', '<', content)
-    content = re.sub(r'&gt;', '>', content)
-    
-    # Clean up whitespace
-    content = re.sub(r'[ \t]+', ' ', content)  # Multiple spaces/tabs to single space
-    content = re.sub(r'\n\s*\n', '\n\n', content)  # Multiple newlines to double newline
-    content = re.sub(r'^\s+|\s+$', '', content, flags=re.MULTILINE)  # Trim each line
-    
-    return content.strip()
-
-# Replace your existing extract_genius_lyrics function with this:
-def extract_genius_lyrics_updated(html_content: str) -> str:
-    """Updated Genius lyrics extraction - simpler and more accurate"""
-    try:
-        # Method 1: Look for data-lyrics-container with <p> content
-        container_pattern = r'<div[^>]*data-lyrics-container="true"[^>]*>.*?<p[^>]*>(.*?)</p>.*?</div>'
-        match = re.search(container_pattern, html_content, re.DOTALL | re.IGNORECASE)
-        
-        if match:
-            lyrics_content = match.group(1)
-            cleaned = clean_lyrics_content(lyrics_content)
-            if cleaned and len(cleaned) > 50:
-                return cleaned
-        
-        # Method 2: Fallback to original container approach but simplified
-        container_regex = r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>'
-        containers = re.findall(container_regex, html_content, re.IGNORECASE | re.DOTALL)
-        
-        for container in containers:
-            # Look for <p> tags
-            p_matches = re.findall(r'<p[^>]*>(.*?)</p>', container, re.DOTALL)
-            for p_content in p_matches:
-                cleaned = clean_lyrics_content(p_content)
-                if cleaned and len(cleaned) > 50:
-                    return cleaned
+        # Method 3: Look for any div containing substantial lyrics-like content
+        all_divs = doc.xpath('//div')
+        for div in all_divs:
+            text = get_text_content(div)
+            if text and len(text.strip()) > 200 and is_lyrics_like(text):
+                return text.strip()
         
         return ""
         
     except Exception as e:
-        print(f"Error in extraction: {str(e)}")
+        print(f"Error extracting lyrics with lxml: {str(e)}")
+        return ""
+
+def get_text_content(element) -> str:
+    """Extract clean text content from an lxml element"""
+    try:
+        # Get all text content, preserving structure
+        parts = []
+        
+        # Walk through all elements and text
+        for item in element.iter():
+            # Handle line breaks
+            if item.tag == 'br':
+                parts.append('\n')
+            # Get text content
+            if item.text:
+                parts.append(item.text)
+            if item.tail:
+                parts.append(item.tail)
+        
+        # Join and clean
+        text = ''.join(parts)
+        
+        # Clean up text
+        text = clean_text(text)
+        
+        return text
+        
+    except Exception as e:
+        print(f"Error getting text content: {str(e)}")
+        return ""
+
+def clean_text(text: str) -> str:
+    """Clean extracted text"""
+    if not text:
+        return ""
+    
+    # Normalize line breaks
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    
+    # Remove excessive whitespace but preserve intentional breaks
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # Strip whitespace from each line
+        cleaned_line = line.strip()
+        if cleaned_line:  # Only add non-empty lines
+            cleaned_lines.append(cleaned_line)
+        elif cleaned_lines and cleaned_lines[-1]:  # Add empty line only if previous line had content
+            cleaned_lines.append('')
+    
+    # Join lines back
+    result = '\n'.join(cleaned_lines)
+    
+    # Limit consecutive empty lines to 1
+    while '\n\n\n' in result:
+        result = result.replace('\n\n\n', '\n\n')
+    
+    return result.strip()
+
+def is_lyrics_like(text: str) -> bool:
+    """Check if text looks like song lyrics"""
+    if not text or len(text.strip()) < 100:
+        return False
+    
+    # Count line breaks (lyrics usually have many)
+    line_count = text.count('\n')
+    if line_count < 10:
+        return False
+    
+    # Check for common lyrics indicators
+    lyrics_indicators = [
+        '[verse', '[chorus', '[bridge', '[intro', '[outro',
+        '歌詞', 'lyrics', '主歌', '副歌', '導歌', '樂器', '尾奏', 'Pre-Chorus'
+    ]
+    
+    text_lower = text.lower()
+    indicator_count = sum(1 for indicator in lyrics_indicators if indicator in text_lower)
+    
+    return indicator_count > 0
+
+def extract_generic_lyrics(html_content: str, url: str = "") -> str:
+    """Extract lyrics from other sites using lxml"""
+    try:
+        doc = html.fromstring(html_content)
+        
+        if url and 'azlyrics.com' in url:
+            # Look for azlyrics specific content
+            lyrics_divs = doc.xpath('//div[contains(@class, "ringtone")]//following-sibling::div[1]')
+            if lyrics_divs:
+                return get_text_content(lyrics_divs[0])
+        
+        elif url and 'lyrics.com' in url:
+            # Look for lyrics.com specific content
+            lyrics_divs = doc.xpath('//div[@id="lyric-body-text"]')
+            if lyrics_divs:
+                return get_text_content(lyrics_divs[0])
+        
+        # Generic approach - find div with most text that looks like lyrics
+        all_divs = doc.xpath('//div')
+        best_candidate = ""
+        max_score = 0
+        
+        for div in all_divs:
+            text = get_text_content(div)
+            if text and len(text) > 200:
+                # Score based on length and lyrics-like characteristics
+                score = len(text)
+                if is_lyrics_like(text):
+                    score *= 2
+                
+                if score > max_score:
+                    max_score = score
+                    best_candidate = text
+        
+        return best_candidate
+        
+    except Exception as e:
+        print(f"Error extracting generic lyrics: {str(e)}")
         return ""
 
 async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
-    """Format lyrics using OpenAI (same as original)"""
+    """Format lyrics using OpenAI"""
     try:
         messages = [
             {
@@ -161,17 +213,7 @@ async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
         
     except Exception as e:
         print(f"AI formatting error: {str(e)}")
-        
-        # Basic cleanup fallback (same as original)
-        cleaned = re.sub(r'<[^>]*>', '', raw_lyrics)
-        cleaned = re.sub(r'&quot;', '"', cleaned)
-        cleaned = re.sub(r'&#x27;|&#39;', "'", cleaned)
-        cleaned = re.sub(r'&amp;', '&', cleaned)
-        cleaned = re.sub(r'&nbsp;', ' ', cleaned)
-        cleaned = re.sub(r'\n{4,}', '\n\n', cleaned)
-        cleaned = re.sub(r'^\s+|\s+$', '', cleaned, flags=re.MULTILINE)
-        
-        return cleaned.strip()
+        return raw_lyrics.strip()
 
 @lyrics_router.post("/extract", response_model=LyricsResponse)
 async def extract_lyrics(request: LyricsRequest):
@@ -185,25 +227,24 @@ async def extract_lyrics(request: LyricsRequest):
         
         print(f"Processing lyrics: {request.artist} - {request.song}")
         
-        # Determine extraction method based on URL or content
+        # Extract lyrics using lxml
         raw_lyrics = ""
-        source = "html_extraction"
+        source = "lxml_extraction"
         
         if request.url and 'genius.com' in request.url:
             raw_lyrics = extract_genius_lyrics(request.html_content)
-            source = "genius"
+            source = "genius_lxml"
         else:
             # Try Genius extraction first, then generic
             raw_lyrics = extract_genius_lyrics(request.html_content)
             if not raw_lyrics or len(raw_lyrics) < 50:
-                raw_lyrics = extract_genius_lyrics_updated(request.html_content, request.url or "")
-                source = "generic"
+                raw_lyrics = extract_generic_lyrics(request.html_content, request.url or "")
+                source = "generic_lxml"
             else:
-                source = "genius"
+                source = "genius_lxml"
         
         if not raw_lyrics or len(raw_lyrics) < 50:
             print(f"Raw lyrics too short: {len(raw_lyrics) if raw_lyrics else 0} characters")
-            print(f"HTML preview: {request.html_content[:500]}...")
             raise HTTPException(
                 status_code=404,
                 detail=f'Could not extract lyrics for "{request.song}" by {request.artist}. Please check the HTML content.'

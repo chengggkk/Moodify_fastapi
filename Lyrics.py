@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-import openai
+from openai import AsyncOpenAI
 import os
 from lxml import html
 from datetime import datetime
@@ -27,12 +27,12 @@ class LyricsResponse(BaseModel):
     error: Optional[str] = None
 
 # Initialize OpenAI client
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 async def call_openai(messages, temperature=0.3):
     """Call OpenAI API for lyrics formatting"""
     try:
-        response = await openai.responses.create(
+        response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             temperature=temperature,
@@ -62,11 +62,11 @@ def extract_genius_lyrics(html_content: str) -> str:
             if lyrics_text and len(lyrics_text.strip()) > 50:
                 return lyrics_text.strip()
         
-        # Method 3: Look for any div containing substantial lyrics-like content
+        # Method 3: Look for any div containing substantial content
         all_divs = doc.xpath('//div')
         for div in all_divs:
             text = get_text_content(div)
-            if text and len(text.strip()) > 200 and is_lyrics_like(text):
+            if text and len(text.strip()) > 200:
                 return text.strip()
         
         return ""
@@ -133,27 +133,6 @@ def clean_text(text: str) -> str:
     
     return result.strip()
 
-def is_lyrics_like(text: str) -> bool:
-    """Check if text looks like song lyrics"""
-    if not text or len(text.strip()) < 100:
-        return False
-    
-    # Count line breaks (lyrics usually have many)
-    line_count = text.count('\n')
-    if line_count < 10:
-        return False
-    
-    # Check for common lyrics indicators
-    lyrics_indicators = [
-        '[verse', '[chorus', '[bridge', '[intro', '[outro',
-        '歌詞', 'lyrics', '主歌', '副歌', '導歌', '樂器', '尾奏', 'Pre-Chorus'
-    ]
-    
-    text_lower = text.lower()
-    indicator_count = sum(1 for indicator in lyrics_indicators if indicator in text_lower)
-    
-    return indicator_count > 0
-
 def extract_generic_lyrics(html_content: str, url: str = "") -> str:
     """Extract lyrics from other sites using lxml"""
     try:
@@ -171,22 +150,16 @@ def extract_generic_lyrics(html_content: str, url: str = "") -> str:
             if lyrics_divs:
                 return get_text_content(lyrics_divs[0])
         
-        # Generic approach - find div with most text that looks like lyrics
+        # Generic approach - find div with most text
         all_divs = doc.xpath('//div')
         best_candidate = ""
-        max_score = 0
+        max_length = 0
         
         for div in all_divs:
             text = get_text_content(div)
-            if text and len(text) > 200:
-                # Score based on length and lyrics-like characteristics
-                score = len(text)
-                if is_lyrics_like(text):
-                    score *= 2
-                
-                if score > max_score:
-                    max_score = score
-                    best_candidate = text
+            if text and len(text) > max_length and len(text) > 200:
+                max_length = len(text)
+                best_candidate = text
         
         return best_candidate
         

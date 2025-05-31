@@ -49,7 +49,17 @@ def calculate_similarity(str1: str, str2: str) -> float:
     """Calculate similarity between two strings"""
     return SequenceMatcher(None, str1, str2).ratio()
 
-
+def get_random_user_agent() -> str:
+    """Get a random user agent to avoid blocking"""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    ]
+    return random.choice(user_agents)
 
 def get_session_with_retries():
     """Create a requests session with retry strategy and better headers"""
@@ -87,27 +97,6 @@ def get_enhanced_headers():
         'Sec-CH-UA-Mobile': '?0',
         'Sec-CH-UA-Platform': '"Windows"',
     }
-
-async def fetch_with_multiple_strategies(url: str) -> Optional[str]:
-    """Try multiple strategies to fetch content"""
-    strategies = [
-        fetch_with_session,
-        fetch_with_cloudflare_bypass,
-        fetch_with_proxy_headers,
-    ]
-    
-    for i, strategy in enumerate(strategies):
-        try:
-            print(f"Trying strategy {i+1} for {url}")
-            content = await strategy(url)
-            if content:
-                print(f"Strategy {i+1} successful")
-                return content
-        except Exception as e:
-            print(f"Strategy {i+1} failed: {e}")
-            continue
-    
-    return None
 
 async def fetch_with_session(url: str) -> Optional[str]:
     """Fetch with enhanced session"""
@@ -190,58 +179,26 @@ async def fetch_with_proxy_headers(url: str) -> Optional[str]:
         print(f"Proxy headers error: {e}")
         return None
 
-async def search_genius_song(artist: str, title: str) -> Optional[dict]:
-    """Search for song on Genius API"""
-    if not GENIUS_API_KEY:
-        return None
+async def fetch_with_multiple_strategies(url: str) -> Optional[str]:
+    """Try multiple strategies to fetch content"""
+    strategies = [
+        fetch_with_session,
+        fetch_with_cloudflare_bypass,
+        fetch_with_proxy_headers,
+    ]
     
-    try:
-        search_query = f"{artist} {title}"
-        url = "https://api.genius.com/search"
-        headers = {
-            "Authorization": f"Bearer {GENIUS_API_KEY}",
-            "Accept": "application/json"
-        }
-        params = {"q": search_query}
-        
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        if not data.get("response", {}).get("hits"):
-            return None
-        
-        # Find the best match
-        normalized_artist = normalize_string(artist)
-        normalized_title = normalize_string(title)
-        
-        best_match = None
-        best_score = 0
-        
-        for hit in data["response"]["hits"]:
-            result = hit.get("result", {})
-            if not result:
-                continue
-                
-            result_artist = normalize_string(result.get("primary_artist", {}).get("name", ""))
-            result_title = normalize_string(result.get("title", ""))
-            
-            artist_score = calculate_similarity(normalized_artist, result_artist)
-            title_score = calculate_similarity(normalized_title, result_title)
-            
-            # Combined score with higher weight on title
-            combined_score = (artist_score * 0.4 + title_score * 0.6)
-            
-            if combined_score > best_score and combined_score > 0.7:
-                best_score = combined_score
-                best_match = result
-        
-        return best_match
-        
-    except Exception as e:
-        print(f"Genius API search error: {e}")
-        return None
+    for i, strategy in enumerate(strategies):
+        try:
+            print(f"Trying strategy {i+1} for {url}")
+            content = await strategy(url)
+            if content:
+                print(f"Strategy {i+1} successful")
+                return content
+        except Exception as e:
+            print(f"Strategy {i+1} failed: {e}")
+            continue
+    
+    return None
 
 def extract_lyrics_with_lxml(html_content: str) -> str:
     """Extract lyrics using lxml from Genius page"""
@@ -336,26 +293,6 @@ def clean_lyrics_text(text: str) -> str:
     
     return '\n'.join(cleaned_lines)
 
-async def try_alternative_lyrics_sources(artist: str, title: str) -> Optional[str]:
-    """Try alternative lyrics sources when Genius fails"""
-    alternative_sources = [
-        f"https://www.azlyrics.com/lyrics/{artist.lower().replace(' ', '')}/{title.lower().replace(' ', '')}.html",
-        f"https://www.lyrics.com/lyric/{title.replace(' ', '+')}/{artist.replace(' ', '+')}",
-    ]
-    
-    for source_url in alternative_sources:
-        try:
-            content = await fetch_with_multiple_strategies(source_url)
-            if content:
-                lyrics = extract_lyrics_from_alternative_source(content, source_url)
-                if lyrics:
-                    return lyrics
-        except Exception as e:
-            print(f"Alternative source {source_url} failed: {e}")
-            continue
-    
-    return None
-
 def extract_lyrics_from_alternative_source(html_content: str, url: str) -> str:
     """Extract lyrics from alternative sources"""
     try:
@@ -380,6 +317,83 @@ def extract_lyrics_from_alternative_source(html_content: str, url: str) -> str:
     except Exception as e:
         print(f"Alternative extraction error: {e}")
         return ""
+
+async def try_alternative_lyrics_sources(artist: str, title: str) -> Optional[str]:
+    """Try alternative lyrics sources when Genius fails"""
+    # Clean artist and title for URL construction
+    clean_artist = re.sub(r'[^\w\s]', '', artist).replace(' ', '')
+    clean_title = re.sub(r'[^\w\s]', '', title).replace(' ', '')
+    
+    alternative_sources = [
+        f"https://www.azlyrics.com/lyrics/{clean_artist.lower()}/{clean_title.lower()}.html",
+        f"https://www.lyrics.com/lyric/{title.replace(' ', '+')}/{artist.replace(' ', '+')}",
+    ]
+    
+    for source_url in alternative_sources:
+        try:
+            content = await fetch_with_multiple_strategies(source_url)
+            if content:
+                lyrics = extract_lyrics_from_alternative_source(content, source_url)
+                if lyrics and len(lyrics) > 50:
+                    return lyrics
+        except Exception as e:
+            print(f"Alternative source {source_url} failed: {e}")
+            continue
+    
+    return None
+
+async def search_genius_song(artist: str, title: str) -> Optional[dict]:
+    """Search for song on Genius API"""
+    if not GENIUS_API_KEY:
+        return None
+    
+    try:
+        search_query = f"{artist} {title}"
+        url = "https://api.genius.com/search"
+        headers = {
+            "Authorization": f"Bearer {GENIUS_API_KEY}",
+            "Accept": "application/json"
+        }
+        params = {"q": search_query}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if not data.get("response", {}).get("hits"):
+            return None
+        
+        # Find the best match
+        normalized_artist = normalize_string(artist)
+        normalized_title = normalize_string(title)
+        
+        best_match = None
+        best_score = 0
+        
+        for hit in data["response"]["hits"]:
+            result = hit.get("result", {})
+            if not result:
+                continue
+                
+            result_artist = normalize_string(result.get("primary_artist", {}).get("name", ""))
+            result_title = normalize_string(result.get("title", ""))
+            
+            artist_score = calculate_similarity(normalized_artist, result_artist)
+            title_score = calculate_similarity(normalized_title, result_title)
+            
+            # Combined score with higher weight on title
+            combined_score = (artist_score * 0.4 + title_score * 0.6)
+            
+            if combined_score > best_score and combined_score > 0.7:
+                best_score = combined_score
+                best_match = result
+        
+        return best_match
+        
+    except Exception as e:
+        print(f"Genius API search error: {e}")
+        return None
 
 async def fetch_lyrics_from_genius(song_data: dict) -> str:
     """Fetch lyrics from Genius song page with enhanced anti-blocking"""

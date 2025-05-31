@@ -180,9 +180,6 @@ async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
                 "content": f'Clean these lyrics for "{song}" by "{artist}":\n\n{raw_lyrics[:15000]}'
             }
         ]
-        print(raw_lyrics)
-        print("===================================================")
-        print(messages)
         formatted = await call_openai(messages)
         return formatted.strip()
         

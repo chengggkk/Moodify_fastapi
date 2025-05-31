@@ -33,8 +33,8 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 async def call_openai(messages, temperature=0.3):
     """Call OpenAI API for lyrics formatting"""
     try:
-        response = await openai.ChatCompletion.acreate(
-            model="gpt-4-turbo",
+        response = await openai.responses.create(
+            model="gpt-4o-mini",
             messages=messages,
             temperature=temperature,
             max_tokens=4000
@@ -42,80 +42,104 @@ async def call_openai(messages, temperature=0.3):
         return response.choices[0].message.content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
-
 def extract_genius_lyrics(html_content: str) -> str:
-    """Extract lyrics from Genius HTML using regex (matching original working function)"""
+    """Simplified and more accurate Genius lyrics extraction"""
     try:
-        # Look for lyrics containers using regex (same as original working code)
-        container_regex = r'<div[^>]*data-lyrics-container="true"[^>]*>([\s\S]*?)</div>'
-        containers = re.findall(container_regex, html_content, re.IGNORECASE)
-
-        if not containers:
+        # First, look for the main lyrics container
+        container_pattern = r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>(?:\s*</div>)*'
+        container_match = re.search(container_pattern, html_content, re.DOTALL | re.IGNORECASE)
+        
+        if not container_match:
             return ""
-
-        all_lyrics = []
         
-        for content in containers:
-            # Extract from paragraph tags if present
-            p_match = re.search(r'<p[^>]*>([\s\S]*?)</p>', content)
-            if p_match:
-                content = p_match.group(1)
-
-            # Clean HTML and format (exactly like original)
-            cleaned = content
-            cleaned = re.sub(r'<br\s*/?>', '\n', cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r'<[^>]+>', '', cleaned)
-            cleaned = re.sub(r'&quot;', '"', cleaned)
-            cleaned = re.sub(r'&#x27;|&#39;', "'", cleaned)
-            cleaned = re.sub(r'&amp;', '&', cleaned)
-            cleaned = re.sub(r'&nbsp;', ' ', cleaned)
-            cleaned = re.sub(r'\s+', ' ', cleaned)
-            cleaned = re.sub(r'^\s+|\s+$', '', cleaned, flags=re.MULTILINE)
-            cleaned = cleaned.strip()
-            
-            if len(cleaned) > 50:
-                all_lyrics.append(cleaned)
-
-        result = '\n\n'.join(all_lyrics)
-        result = re.sub(r'\n{3,}', '\n\n', result).strip()
-        return result
+        container_content = container_match.group(1)
+        
+        # Extract lyrics from <p> tags within the container
+        # This captures the main lyrics content
+        p_pattern = r'<p[^>]*>(.*?)</p>'
+        p_matches = re.findall(p_pattern, container_content, re.DOTALL | re.IGNORECASE)
+        
+        if not p_matches:
+            return ""
+        
+        # Process the lyrics content
+        lyrics_parts = []
+        for p_content in p_matches:
+            # Clean the content
+            cleaned = clean_lyrics_content(p_content)
+            if cleaned and len(cleaned.strip()) > 20:  # Only add substantial content
+                lyrics_parts.append(cleaned)
+        
+        # Join all parts
+        result = '\n\n'.join(lyrics_parts)
+        
+        # Final cleanup
+        result = re.sub(r'\n{3,}', '\n\n', result)
+        return result.strip()
         
     except Exception as e:
-        print(f"Error extracting Genius lyrics: {str(e)}")
+        print(f"Error in simplified extraction: {str(e)}")
         return ""
 
-def extract_generic_lyrics(html_content: str, url: str = "") -> str:
-    """Extract lyrics from other sites using regex (matching original working function)"""
+def clean_lyrics_content(content: str) -> str:
+    """Clean individual lyrics content"""
+    # Remove links but keep their text content
+    content = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', content, flags=re.DOTALL)
+    
+    # Remove spans but keep their text content  
+    content = re.sub(r'<span[^>]*>(.*?)</span>', r'\1', content, flags=re.DOTALL)
+    
+    # Convert <br> tags to newlines
+    content = re.sub(r'<br\s*/?>', '\n', content, flags=re.IGNORECASE)
+    
+    # Remove any remaining HTML tags
+    content = re.sub(r'<[^>]+>', '', content)
+    
+    # Decode HTML entities
+    content = re.sub(r'&quot;', '"', content)
+    content = re.sub(r'&#x27;|&#39;', "'", content)
+    content = re.sub(r'&amp;', '&', content)
+    content = re.sub(r'&nbsp;', ' ', content)
+    content = re.sub(r'&lt;', '<', content)
+    content = re.sub(r'&gt;', '>', content)
+    
+    # Clean up whitespace
+    content = re.sub(r'[ \t]+', ' ', content)  # Multiple spaces/tabs to single space
+    content = re.sub(r'\n\s*\n', '\n\n', content)  # Multiple newlines to double newline
+    content = re.sub(r'^\s+|\s+$', '', content, flags=re.MULTILINE)  # Trim each line
+    
+    return content.strip()
+
+# Replace your existing extract_genius_lyrics function with this:
+def extract_genius_lyrics_updated(html_content: str) -> str:
+    """Updated Genius lyrics extraction - simpler and more accurate"""
     try:
-        if url and 'azlyrics.com' in url:
-            match = re.search(r'<!-- Usage of azlyrics\.com content[\s\S]*?-->([\s\S]*?)<!-- MxM banner -->', html_content)
-            if match:
-                return re.sub(r'<[^>]*>', '', match.group(1)).strip()
+        # Method 1: Look for data-lyrics-container with <p> content
+        container_pattern = r'<div[^>]*data-lyrics-container="true"[^>]*>.*?<p[^>]*>(.*?)</p>.*?</div>'
+        match = re.search(container_pattern, html_content, re.DOTALL | re.IGNORECASE)
         
-        elif url and 'lyrics.com' in url:
-            matches = re.findall(r'<div[^>]*id="lyric-body-text"[^>]*>([\s\S]*?)</div>', html_content, re.IGNORECASE)
-            if matches:
-                return '\n'.join([re.sub(r'<[^>]*>', '', m).strip() for m in matches]).strip()
+        if match:
+            lyrics_content = match.group(1)
+            cleaned = clean_lyrics_content(lyrics_content)
+            if cleaned and len(cleaned) > 50:
+                return cleaned
         
-        else:
-            # Generic extraction - find largest text block (same as original)
-            div_matches = re.findall(r'<div[^>]*>([\s\S]*?)</div>', html_content)
-            text_blocks = []
-            
-            for match in div_matches:
-                text = re.sub(r'<[^>]*>', '', match).strip()
-                if len(text) > 200 and '\n' in text:
-                    text_blocks.append(text)
-            
-            # Sort by length and return the longest
-            if text_blocks:
-                text_blocks.sort(key=len, reverse=True)
-                return text_blocks[0]
-            
+        # Method 2: Fallback to original container approach but simplified
+        container_regex = r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>'
+        containers = re.findall(container_regex, html_content, re.IGNORECASE | re.DOTALL)
+        
+        for container in containers:
+            # Look for <p> tags
+            p_matches = re.findall(r'<p[^>]*>(.*?)</p>', container, re.DOTALL)
+            for p_content in p_matches:
+                cleaned = clean_lyrics_content(p_content)
+                if cleaned and len(cleaned) > 50:
+                    return cleaned
+        
         return ""
         
     except Exception as e:
-        print(f"Error extracting generic lyrics: {str(e)}")
+        print(f"Error in extraction: {str(e)}")
         return ""
 
 async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
@@ -172,7 +196,7 @@ async def extract_lyrics(request: LyricsRequest):
             # Try Genius extraction first, then generic
             raw_lyrics = extract_genius_lyrics(request.html_content)
             if not raw_lyrics or len(raw_lyrics) < 50:
-                raw_lyrics = extract_generic_lyrics(request.html_content, request.url or "")
+                raw_lyrics = extract_genius_lyrics_updated(request.html_content, request.url or "")
                 source = "generic"
             else:
                 source = "genius"

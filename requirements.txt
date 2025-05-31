@@ -7,14 +7,8 @@ python-multipart
 aiofiles
 httpx
 
-# Audio processing and analysis
-librosa
-soundfile
 scipy
 numpy
-
-# YouTube downloading
-yt-dlp
 
 # HTTP client for API calls
 aiohttp
@@ -24,17 +18,11 @@ torch
 transformers
 openai
 einops
-opencv-python
-pillow
 protobuf
 sentencepiece
 beautifulsoup4
 mistralai
 
-# Additional audio/video processing (optional but recommended)
-ffmpeg-python
-
 # Logging and utilities
 requests
 lxml
-lyricsgenius

@@ -47,7 +47,7 @@ Step 4: CREATIVE CATALYST IDENTIFICATION
 - Find unique angles that haven't been explored before
 - Identify emotional triggers that create story momentum
 
-Please provide your creative analysis in English, focusing on unlocking maximum storytelling potential and creative inspiration.
+Please ONLY provide a RICH meaning STORY.
                    """
     )
     if customize:

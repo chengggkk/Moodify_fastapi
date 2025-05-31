@@ -49,7 +49,7 @@ def extract_genius_lyrics(html_content: str) -> str:
         doc = html.fromstring(html_content)
         
         # Method 1: Look for div with id="lyrics"
-        lyrics_div = doc.xpath('//div[@id="lyrics"]')
+        lyrics_div = doc.xpath('//div[@id="lyrics-root"]')
         if lyrics_div:
             lyrics_text = get_text_content(lyrics_div[0])
             if lyrics_text and len(lyrics_text.strip()) > 50:

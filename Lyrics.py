@@ -173,7 +173,7 @@ async def format_lyrics_with_ai(raw_lyrics: str, artist: str, song: str) -> str:
         messages = [
             {
                 "role": "system",
-                "content": "Clean and format song lyrics while preserving all actual lyrical content. Remove only website navigation, metadata, and formatting artifacts. Keep section labels like [Verse], [Chorus]. Support multiple languages including English, Chinese, Japanese, and Korean."
+                "content": "Clean and format song lyrics while preserving all actual lyrical content. Remove only website navigation, metadata, and formatting artifacts. Keep section labels like [Verse], [Chorus]. Support multiple languages including English, Chinese, Japanese, and Korean. IMPORTANT:ONLY RETURN THE LYRICS"
             },
             {
                 "role": "user", 

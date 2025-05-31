@@ -46,7 +46,7 @@ def extract_genius_lyrics(html_content: str) -> str:
     """Simplified and more accurate Genius lyrics extraction"""
     try:
         # First, look for the main lyrics container
-        container_pattern = r'<div[^>]*data-lyrics-container[^>]*>(.*?)</div>(?:\s*</div>)*'
+        container_pattern = r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>(?:\s*</div>)*'
         container_match = re.search(container_pattern, html_content, re.DOTALL | re.IGNORECASE)
         
         if not container_match:

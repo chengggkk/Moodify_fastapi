@@ -334,6 +334,51 @@ def clean_lyrics_text(text: str) -> str:
     
     return '\n'.join(cleaned_lines)
 
+async def try_alternative_lyrics_sources(artist: str, title: str) -> Optional[str]:
+    """Try alternative lyrics sources when Genius fails"""
+    alternative_sources = [
+        f"https://www.azlyrics.com/lyrics/{artist.lower().replace(' ', '')}/{title.lower().replace(' ', '')}.html",
+        f"https://www.lyrics.com/lyric/{title.replace(' ', '+')}/{artist.replace(' ', '+')}",
+    ]
+    
+    for source_url in alternative_sources:
+        try:
+            content = await fetch_with_multiple_strategies(source_url)
+            if content:
+                lyrics = extract_lyrics_from_alternative_source(content, source_url)
+                if lyrics:
+                    return lyrics
+        except Exception as e:
+            print(f"Alternative source {source_url} failed: {e}")
+            continue
+    
+    return None
+
+def extract_lyrics_from_alternative_source(html_content: str, url: str) -> str:
+    """Extract lyrics from alternative sources"""
+    try:
+        tree = html.fromstring(html_content)
+        
+        if "azlyrics.com" in url:
+            # AZLyrics specific extraction
+            divs = tree.xpath('//div[not(@*)]')
+            for div in divs:
+                text = etree.tostring(div, method="text", encoding="unicode").strip()
+                if len(text) > 200 and '\n' in text:
+                    return clean_lyrics_text(text)
+        
+        elif "lyrics.com" in url:
+            # Lyrics.com specific extraction
+            lyrics_div = tree.xpath('//div[@id="lyric-body-text"]')
+            if lyrics_div:
+                text = etree.tostring(lyrics_div[0], method="text", encoding="unicode")
+                return clean_lyrics_text(text)
+        
+        return ""
+    except Exception as e:
+        print(f"Alternative extraction error: {e}")
+        return ""
+
 async def fetch_lyrics_from_genius(song_data: dict) -> str:
     """Fetch lyrics from Genius song page with enhanced anti-blocking"""
     try:

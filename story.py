@@ -48,6 +48,7 @@ Step 4: CREATIVE CATALYST IDENTIFICATION
 - Identify emotional triggers that create story momentum
 
 Please ONLY provide a RICH meaning STORY.
+FORMAT: HTML
                    """
     )
     if customize:

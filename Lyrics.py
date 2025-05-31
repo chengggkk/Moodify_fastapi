@@ -6,8 +6,10 @@ import re
 import time
 import random
 import unicodedata
-from typing import Optional
+from typing import Optional, List
 from difflib import SequenceMatcher
+from lxml import html, etree
+import json
 
 lyrics_router = APIRouter(prefix="/lyrics", tags=["lyrics"])
 
@@ -20,42 +22,19 @@ class LyricsResponse(BaseModel):
     artist: str
     lyrics: str
     source: str
+    formatted_lyrics: str  # Mistral AI formatted version
 
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
-GENIUS_API_KEY = os.getenv("GENIUS_API_KEY")
 
 # User agents rotation to avoid 403
 USER_AGENTS = [
-    # Chrome (Windows)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.86 Safari/537.36",
-
-    # Chrome (Mac)
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.86 Safari/537.36",
-
-    # Firefox (Windows)
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Windows NT 10.0; rv:125.0) Gecko/20100101 Firefox/125.0",
-
-    # Firefox (Linux)
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
-
-    # Safari (macOS)
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
-
-    # Edge (Windows)
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Safari/537.36 Edg/124.0.2478.80",
-
-    # Mobile Chrome (Android)
-    "Mozilla/5.0 (Linux; Android 14; Pixel 7 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.118 Mobile Safari/537.36",
-
-    # Mobile Safari (iPhone)
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-
-    # Mobile Firefox (Android)
-    "Mozilla/5.0 (Android 14; Mobile; rv:126.0) Gecko/126.0 Firefox/126.0"
 ]
+
 def normalize_text(text: str) -> str:
     """Normalize text for multilingual comparison"""
     if not text:
@@ -133,7 +112,6 @@ def get_headers():
         'Upgrade-Insecure-Requests': '1',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache',
-        # Some sites also check these
         'TE': 'trailers'
     }
 
@@ -151,12 +129,6 @@ async def fetch_with_retry(url: str, max_retries: int = 3) -> Optional[str]:
                 return response.text
             elif response.status_code == 403:
                 print(f"403 error on attempt {attempt + 1}, retrying...")
-                # Try mobile version for Genius
-                if 'genius.com' in url and attempt == 1:
-                    mobile_url = url.replace('genius.com', 'm.genius.com')
-                    mobile_response = requests.get(mobile_url, headers=get_headers(), timeout=15)
-                    if mobile_response.status_code == 200:
-                        return mobile_response.text
             else:
                 print(f"HTTP {response.status_code} on attempt {attempt + 1}")
                 
@@ -165,129 +137,147 @@ async def fetch_with_retry(url: str, max_retries: int = 3) -> Optional[str]:
     
     return None
 
-def extract_lyrics_simple(html_content: str, url: str) -> str:
-    """Simple lyrics extraction that works across multiple sites"""
+def extract_lyrics_with_lxml(html_content: str, url: str) -> str:
+    """Extract lyrics using lxml for better parsing"""
     if not html_content:
         return ""
     
-    lyrics = ""
-    
-    # Genius.com extraction
-    if 'genius.com' in url:
-        # Look for lyrics containers
-        containers = re.findall(r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>', html_content, re.DOTALL)
-        for container in containers:
-            # Skip headers
-            if 'LyricsHeader' in container and len(container) < 500:
-                continue
-            
-            # Extract text from container
-            text = re.sub(r'<br\s*/?>', '\n', container)
-            text = re.sub(r'<[^>]+>', '', text)
-            text = re.sub(r'&[a-zA-Z0-9#]+;', lambda m: {
-                '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"',
-                '&#x27;': "'", '&#39;': "'", '&nbsp;': ' '
-            }.get(m.group(0), ''), text)
-            
-            if len(text.strip()) > 50:
-                lyrics += text.strip() + "\n\n"
-    
-    # AZLyrics extraction
-    elif 'azlyrics.com' in url:
-        match = re.search(r'<!-- Usage of azlyrics\.com content.*?-->(.*?)<!-- MxM banner -->', html_content, re.DOTALL)
-        if match:
-            lyrics = re.sub(r'<[^>]*>', '', match.group(1)).strip()
-    
-    # Lyrics.com extraction
-    elif 'lyrics.com' in url:
-        matches = re.findall(r'<div[^>]*id="lyric-body-text"[^>]*>(.*?)</div>', html_content, re.DOTALL)
-        for match in matches:
-            lyrics += re.sub(r'<[^>]*>', '', match).strip() + "\n\n"
-    
-    # Generic extraction
-    else:
-        # Remove scripts and styles
-        clean_html = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html_content, flags=re.DOTALL)
-        
-        # Look for div blocks with substantial text content
-        divs = re.findall(r'<div[^>]*>(.*?)</div>', clean_html, re.DOTALL)
-        candidates = []
-        
-        for div in divs:
-            text = re.sub(r'<[^>]*>', '', div).strip()
-            # Check if it looks like lyrics (has line breaks and reasonable length)
-            if len(text) > 200 and text.count('\n') > 5:
-                candidates.append(text)
-        
-        if candidates:
-            lyrics = max(candidates, key=len)
-    
-    # Clean up final lyrics
-    if lyrics:
-        lyrics = re.sub(r'\n\s*\n\s*\n+', '\n\n', lyrics)
-        lyrics = re.sub(r'[ \t]+', ' ', lyrics)
-        lyrics = lyrics.strip()
-    
-    return lyrics
-
-async def search_genius_api(artist: str, title: str) -> Optional[dict]:
-    """Search Genius API with multilingual support"""
-    if not GENIUS_API_KEY:
-        return None
-    
     try:
-        # Try multiple search variations
-        search_queries = [
-            f"{artist} {title}",
-            f"{title} {artist}",
-            title
-        ]
+        # Parse HTML with lxml
+        tree = html.fromstring(html_content)
+        lyrics = ""
         
-        best_match = None
-        best_score = 0
-        
-        for query in search_queries:
-            url = f"https://api.genius.com/search?q={requests.utils.quote(query)}"
-            headers = {
-                'Authorization': f'Bearer {GENIUS_API_KEY}',
-                'Accept': 'application/json'
-            }
-            
-            response = requests.get(url, headers=headers, timeout=10)
-            if not response.ok:
-                continue
-            
-            data = response.json()
-            hits = data.get('response', {}).get('hits', [])
-            
-            for hit in hits:
-                result = hit.get('result', {})
-                if not result:
+        # Genius.com extraction
+        if 'genius.com' in url:
+            # Look for lyrics containers using XPath
+            lyrics_containers = tree.xpath('//div[@data-lyrics-container="true"]')
+            for container in lyrics_containers:
+                # Skip header containers
+                if 'LyricsHeader' in etree.tostring(container, encoding='unicode'):
                     continue
                 
-                result_artist = result.get('primary_artist', {}).get('name', '')
-                result_title = result.get('title', '')
-                
-                score = score_match(artist, title, result_artist, result_title)
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = result
+                # Extract text content
+                text_content = container.text_content()
+                if len(text_content.strip()) > 50:
+                    lyrics += text_content.strip() + "\n\n"
         
-        # Lower threshold for multilingual content
-        if best_match and best_score >= 40:  # Reduced from 70
-            return best_match
+        # AZLyrics extraction
+        elif 'azlyrics.com' in url:
+            # Find the main lyrics div
+            lyrics_divs = tree.xpath('//div[contains(@class, "lyrics") or contains(@style, "text-align")]')
+            for div in lyrics_divs:
+                text = div.text_content().strip()
+                if len(text) > 200:
+                    lyrics += text + "\n\n"
         
-        return None
+        # Lyrics.com extraction
+        elif 'lyrics.com' in url:
+            lyrics_divs = tree.xpath('//div[@id="lyric-body-text"]')
+            for div in lyrics_divs:
+                lyrics += div.text_content().strip() + "\n\n"
+        
+        # LyricsFind extraction
+        elif 'lyricsFind.com' in url.lower():
+            lyrics_divs = tree.xpath('//div[@class="lyrics"]')
+            for div in lyrics_divs:
+                lyrics += div.text_content().strip() + "\n\n"
+        
+        # Generic extraction for other sites
+        else:
+            # Try common lyrics selectors
+            selectors = [
+                '//div[contains(@class, "lyrics")]',
+                '//div[contains(@id, "lyrics")]',
+                '//div[contains(@class, "song-lyrics")]',
+                '//pre[contains(@class, "lyrics")]',
+                '//p[contains(@class, "lyrics")]'
+            ]
+            
+            for selector in selectors:
+                elements = tree.xpath(selector)
+                for element in elements:
+                    text = element.text_content().strip()
+                    if len(text) > 100 and text.count('\n') > 3:
+                        lyrics += text + "\n\n"
+                        break
+                if lyrics:
+                    break
+        
+        # Clean up final lyrics
+        if lyrics:
+            lyrics = re.sub(r'\n\s*\n\s*\n+', '\n\n', lyrics)
+            lyrics = re.sub(r'[ \t]+', ' ', lyrics)
+            lyrics = lyrics.strip()
+        
+        return lyrics
         
     except Exception as e:
-        print(f"Genius API error: {e}")
-        return None
+        print(f"lxml extraction error: {e}")
+        return ""
 
-async def search_with_brave(artist: str, title: str) -> Optional[str]:
-    """Search using Brave API"""
+def format_lyrics_mistral(lyrics: str, title: str, artist: str) -> str:
+    """Format lyrics in Mistral AI format"""
+    if not lyrics:
+        return ""
+    
+    # Create structured format
+    formatted = {
+        "song_info": {
+            "title": title,
+            "artist": artist,
+        },
+        "lyrics": {
+            "sections": []
+        }
+    }
+    
+    # Split lyrics into sections
+    sections = lyrics.split('\n\n')
+    current_section = None
+    
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        
+        # Identify section types
+        section_lower = section.lower()
+        if any(marker in section_lower for marker in ['[verse', '[chorus', '[bridge', '[intro', '[outro', '[主歌', '[副歌', '[導歌']):
+            # This is a section header
+            current_section = {
+                "type": section.strip('[]'),
+                "lines": []
+            }
+            formatted["lyrics"]["sections"].append(current_section)
+        else:
+            # This is lyrics content
+            if current_section is None:
+                current_section = {
+                    "type": "verse",
+                    "lines": []
+                }
+                formatted["lyrics"]["sections"].append(current_section)
+            
+            # Split into lines
+            lines = [line.strip() for line in section.split('\n') if line.strip()]
+            current_section["lines"].extend(lines)
+    
+    # Convert to formatted string
+    result = f"# {title} by {artist}\n\n"
+    
+    for i, section in enumerate(formatted["lyrics"]["sections"]):
+        if section["lines"]:
+            result += f"## {section['type'].title()}\n"
+            for line in section["lines"]:
+                result += f"{line}\n"
+            result += "\n"
+    
+    return result.strip()
+
+async def search_with_brave_top3(artist: str, title: str) -> List[dict]:
+    """Search using Brave API and return top 3 results"""
     if not BRAVE_API_KEY:
-        return None
+        return []
     
     try:
         # Add language-specific terms
@@ -309,38 +299,34 @@ async def search_with_brave(artist: str, title: str) -> Optional[str]:
         
         response = requests.get(url, headers=headers, timeout=10)
         if not response.ok:
-            return None
+            return []
         
         data = response.json()
         results = data.get('web', {}).get('results', [])
         
-        # Try top results from known lyrics sites
-        lyrics_sites = ['genius.com', 'azlyrics.com', 'lyrics.com', 'metrolyrics.com']
+        # Filter and prioritize lyrics sites
+        lyrics_sites = ['genius.com', 'azlyrics.com', 'lyrics.com', 'metrolyrics.com', 'lyricsFind.com']
+        prioritized_results = []
+        other_results = []
         
-        for result in results[:5]:
+        for result in results[:10]:  # Check top 10 results
             url = result.get('url', '')
             if any(site in url for site in lyrics_sites):
-                html_content = await fetch_with_retry(url)
-                if html_content:
-                    lyrics = extract_lyrics_simple(html_content, url)
-                    if lyrics and len(lyrics) > 100:
-                        return lyrics
+                prioritized_results.append(result)
+            else:
+                other_results.append(result)
         
-        # Fallback: check descriptions for lyrics
-        for result in results[:3]:
-            desc = result.get('description', '')
-            if len(desc) > 200 and any(word in desc.lower() for word in ['lyrics', 'verse', 'chorus', '歌词', '歌詞', '가사']):
-                return desc
-        
-        return None
+        # Return top 3 (prioritize lyrics sites)
+        final_results = (prioritized_results + other_results)[:3]
+        return final_results
         
     except Exception as e:
         print(f"Brave search error: {e}")
-        return None
+        return []
 
 @lyrics_router.post("/search", response_model=LyricsResponse)
 async def get_lyrics(request: LyricsRequest):
-    """Main lyrics endpoint - simplified and multilingual"""
+    """Main lyrics endpoint - using Brave search and lxml extraction"""
     try:
         artist = request.artist.strip()
         title = request.title.strip()
@@ -353,20 +339,23 @@ async def get_lyrics(request: LyricsRequest):
         lyrics = None
         source = ""
         
-        # Try Genius API first
-        song_data = await search_genius_api(artist, title)
-        if song_data and song_data.get('url'):
-            html_content = await fetch_with_retry(song_data['url'])
-            if html_content:
-                lyrics = extract_lyrics_simple(html_content, song_data['url'])
-                if lyrics and len(lyrics) > 50:
-                    source = "genius_api"
+        # Get top 3 results from Brave search
+        search_results = await search_with_brave_top3(artist, title)
         
-        # Fallback to Brave search
-        if not lyrics or len(lyrics) < 50:
-            lyrics = await search_with_brave(artist, title)
-            if lyrics and len(lyrics) > 50:
-                source = "brave_search"
+        if not search_results:
+            raise HTTPException(status_code=404, detail="No search results found")
+        
+        # Try each of the top 3 results
+        for i, result in enumerate(search_results):
+            url = result.get('url', '')
+            print(f"Trying result {i+1}: {url}")
+            
+            html_content = await fetch_with_retry(url)
+            if html_content:
+                lyrics = extract_lyrics_with_lxml(html_content, url)
+                if lyrics and len(lyrics) > 50:
+                    source = f"brave_search_result_{i+1}"
+                    break
         
         if not lyrics or len(lyrics) < 50:
             # Language-appropriate error message
@@ -381,6 +370,9 @@ async def get_lyrics(request: LyricsRequest):
             
             raise HTTPException(status_code=404, detail=error_msg)
         
+        # Format lyrics using Mistral AI format
+        formatted_lyrics = format_lyrics_mistral(lyrics, title, artist)
+        
         # Final cleanup
         lyrics = lyrics.strip()
         
@@ -388,7 +380,8 @@ async def get_lyrics(request: LyricsRequest):
             title=title,
             artist=artist,
             lyrics=lyrics,
-            source=source
+            source=source,
+            formatted_lyrics=formatted_lyrics
         )
         
     except HTTPException:
@@ -402,6 +395,6 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "genius_api": bool(GENIUS_API_KEY),
-        "brave_api": bool(BRAVE_API_KEY)
+        "brave_api": bool(BRAVE_API_KEY),
+        "features": ["brave_search", "lxml_extraction", "mistral_formatting"]
     }

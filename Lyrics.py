@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import requests
-from bs4 import BeautifulSoup
+from lxml import html, etree
 import os
 from typing import Optional
 from difflib import SequenceMatcher
 import unicodedata
 import re
+import time
+import random
 
 lyrics_router = APIRouter(prefix="/lyrics", tags=["lyrics"])
 
@@ -17,205 +19,319 @@ class LyricsRequest(BaseModel):
 class LyricsResponse(BaseModel):
     title: str
     artist: str
-    lyrics: str 
+    lyrics: str
     source: str
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 GENIUS_API_KEY = os.getenv("GENIUS_API_KEY")
 
+def normalize_string(text: str) -> str:
+    """Normalize string for comparison"""
+    if not text:
+        return ""
+    
+    # Remove accents and normalize unicode
+    text = unicodedata.normalize('NFKD', text)
+    text = ''.join(c for c in text if not unicodedata.combining(c))
+    
+    # Convert to lowercase and remove special characters
+    text = re.sub(r'[^\w\s]', '', text.lower())
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+def calculate_similarity(str1: str, str2: str) -> float:
+    """Calculate similarity between two strings"""
+    return SequenceMatcher(None, str1, str2).ratio()
+
+def get_random_user_agent() -> str:
+    """Get a random user agent to avoid blocking"""
+    user_agents = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    ]
+    return random.choice(user_agents)
+
+async def search_genius_song(artist: str, title: str) -> Optional[dict]:
+    """Search for song on Genius API"""
+    if not GENIUS_API_KEY:
+        return None
+    
+    try:
+        search_query = f"{artist} {title}"
+        url = "https://api.genius.com/search"
+        headers = {
+            "Authorization": f"Bearer {GENIUS_API_KEY}",
+            "Accept": "application/json"
+        }
+        params = {"q": search_query}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if not data.get("response", {}).get("hits"):
+            return None
+        
+        # Find the best match
+        normalized_artist = normalize_string(artist)
+        normalized_title = normalize_string(title)
+        
+        best_match = None
+        best_score = 0
+        
+        for hit in data["response"]["hits"]:
+            result = hit.get("result", {})
+            if not result:
+                continue
+                
+            result_artist = normalize_string(result.get("primary_artist", {}).get("name", ""))
+            result_title = normalize_string(result.get("title", ""))
+            
+            artist_score = calculate_similarity(normalized_artist, result_artist)
+            title_score = calculate_similarity(normalized_title, result_title)
+            
+            # Combined score with higher weight on title
+            combined_score = (artist_score * 0.4 + title_score * 0.6)
+            
+            if combined_score > best_score and combined_score > 0.7:
+                best_score = combined_score
+                best_match = result
+        
+        return best_match
+        
+    except Exception as e:
+        print(f"Genius API search error: {e}")
+        return None
+
+def extract_lyrics_with_lxml(html_content: str) -> str:
+    """Extract lyrics using lxml from Genius page"""
+    try:
+        # Parse HTML with lxml
+        tree = html.fromstring(html_content)
+        
+        # Look for lyrics containers with the specific structure
+        lyrics_containers = tree.xpath('//div[@data-lyrics-container="true"]')
+        
+        if not lyrics_containers:
+            return ""
+        
+        all_lyrics = []
+        
+        for container in lyrics_containers:
+            # Skip header containers (they usually contain metadata, not lyrics)
+            if container.xpath('.//div[contains(@class, "LyricsHeader")]'):
+                continue
+            
+            # Extract text content from paragraphs
+            paragraphs = container.xpath('.//p')
+            
+            for p in paragraphs:
+                # Get all text content including text in nested elements
+                text_parts = []
+                
+                # Process all elements in the paragraph
+                for element in p.iter():
+                    if element.text:
+                        text_parts.append(element.text)
+                    if element.tail:
+                        text_parts.append(element.tail)
+                
+                paragraph_text = ''.join(text_parts)
+                
+                if paragraph_text.strip():
+                    # Clean up the text
+                    clean_text = clean_lyrics_text(paragraph_text)
+                    if clean_text:
+                        all_lyrics.append(clean_text)
+        
+        # If no paragraphs found, try extracting all text from containers
+        if not all_lyrics:
+            for container in lyrics_containers:
+                # Skip headers
+                if container.xpath('.//div[contains(@class, "LyricsHeader")]'):
+                    continue
+                
+                # Get all text content
+                text_content = etree.tostring(container, method="text", encoding="unicode")
+                clean_text = clean_lyrics_text(text_content)
+                if clean_text:
+                    all_lyrics.append(clean_text)
+        
+        return '\n\n'.join(all_lyrics).strip()
+        
+    except Exception as e:
+        print(f"lxml extraction error: {e}")
+        return ""
+
+def clean_lyrics_text(text: str) -> str:
+    """Clean extracted lyrics text"""
+    if not text:
+        return ""
+    
+    # Replace HTML line breaks that might have been missed
+    text = re.sub(r'<br\s*/?>', '\n', text)
+    
+    # Remove remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # Decode HTML entities
+    text = html.unescape(text)
+    
+    # Clean up whitespace
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        line = line.strip()
+        if line:
+            # Remove common metadata patterns
+            if re.match(r'^\d+\s*Contributors?$', line, re.IGNORECASE):
+                continue
+            if re.match(r'^(Share|Embed|Translations?)$', line, re.IGNORECASE):
+                continue
+            if 'genius.com' in line.lower():
+                continue
+            
+            cleaned_lines.append(line)
+    
+    return '\n'.join(cleaned_lines)
+
+async def fetch_lyrics_from_genius(song_data: dict) -> str:
+    """Fetch lyrics from Genius song page"""
+    try:
+        url = song_data.get("url")
+        if not url:
+            return ""
+        
+        headers = {
+            'User-Agent': get_random_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+        }
+        
+        # Add delay to avoid rate limiting
+        time.sleep(random.uniform(1, 3))
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        lyrics = extract_lyrics_with_lxml(response.text)
+        return lyrics
+        
+    except Exception as e:
+        print(f"Error fetching from Genius: {e}")
+        return ""
+
+async def search_with_brave(artist: str, title: str) -> Optional[str]:
+    """Fallback search using Brave Search API"""
+    if not BRAVE_API_KEY:
+        return None
+    
+    try:
+        search_query = f"{artist} {title} lyrics site:genius.com"
+        url = "https://api.search.brave.com/res/v1/web/search"
+        headers = {
+            "Accept": "application/json",
+            "X-Subscription-Token": BRAVE_API_KEY
+        }
+        params = {"q": search_query, "count": 5}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if not data.get("web", {}).get("results"):
+            return None
+        
+        # Try to fetch lyrics from the first few results
+        for result in data["web"]["results"][:3]:
+            if "genius.com" in result.get("url", ""):
+                try:
+                    headers = {
+                        'User-Agent': get_random_user_agent(),
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    }
+                    
+                    time.sleep(random.uniform(1, 2))
+                    
+                    page_response = requests.get(result["url"], headers=headers, timeout=15)
+                    page_response.raise_for_status()
+                    
+                    lyrics = extract_lyrics_with_lxml(page_response.text)
+                    if lyrics and len(lyrics) > 50:
+                        return lyrics
+                        
+                except Exception as e:
+                    print(f"Error fetching from {result['url']}: {e}")
+                    continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"Brave Search error: {e}")
+        return None
 
 @lyrics_router.post("/search", response_model=LyricsResponse)
 async def get_lyrics(request: LyricsRequest):
+    """Get lyrics for a song"""
     try:
-        genius_result = await search_genius_api(request.title, request.artist)
-
-        if genius_result:
-            genius_url = genius_result.get("url", "")
-            if genius_url:
-                processed_content = await process_lyrics_content(genius_url)
-                return LyricsResponse(
-                title=request.title,
-                artist=request.artist,
-                lyrics=processed_content,
-                source="genius"
-                )
-
-        search_urls = await search_web_for_lyrics(request.title, request.artist)
-
-        if search_urls:
-            processed_content = await process_lyrics_content(search_urls[0])
-            return LyricsResponse(
-                title=request.title,
-                artist=request.artist,
-                lyrics=processed_content,
-                source="web_search"
-            )
-
-        raise HTTPException(status_code=404, detail="Lyrics not found")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
-
-
-def normalize_string(s: str) -> str:
-    s = unicodedata.normalize('NFKD', s).encode('ascii', 'ignore').decode('utf-8')
-    s = re.sub(r'[^a-zA-Z0-9\s]', '', s.lower())
-    return s.strip()
-
-
-def calculate_song_similarity(query_artist, query_title, result_artist, result_title, original_artist, original_title):
-    artist_score = SequenceMatcher(None, query_artist, result_artist).ratio() * 100
-    title_score = SequenceMatcher(None, query_title, result_title).ratio() * 100
-    boost = 0
-    if original_artist.lower() == result_artist.lower():
-        boost += 10
-    if original_title.lower() == result_title.lower():
-        boost += 10
-    return int((artist_score + title_score) / 2 + boost)
-
-async def search_genius_api(title: str, artist: str) -> Optional[dict]:
-    if not GENIUS_API_KEY:
-        print("GENIUS_API_KEY is missing.")
-        return None
-
-    print(f"Searching for song on Genius API: {artist} - {title}")
-    search_query = f"{artist} {title}"
-    search_url = "https://api.genius.com/search"
-    headers = {
-        "Authorization": f"Bearer {GENIUS_API_KEY}",
-        "Accept": "application/json"
-    }
-    params = {"q": search_query}
-
-    try:
-        response = requests.get(search_url, headers=headers, params=params)
-        if response.status_code != 200:
-            raise Exception(f"Genius API search failed: {response.status_code}")
-
-        data = response.json()
-        hits = data.get("response", {}).get("hits", [])
-        if not hits:
-            print("No results found on Genius API.")
-            return None
-
-        best_match = None
-        best_score = 0
-
-        query_artist = normalize_string(artist)
-        query_title = normalize_string(title)
-
-        for hit in hits:
-            result = hit.get("result")
-            if not result:
-                continue
-
-            result_artist = normalize_string(result.get("primary_artist", {}).get("name", ""))
-            result_title = normalize_string(result.get("title", ""))
-
-            score = calculate_song_similarity(
-                query_artist, query_title,
-                result_artist, result_title,
-                artist, title
-            )
-
-            print(f"Candidate: {result.get('primary_artist', {}).get('name', '')} - {result.get('title', '')} (Score: {score})")
-
-            if score > best_score:
-                best_score = score
-                best_match = result
-
-        MIN_SCORE_THRESHOLD = 70
-        if best_match and best_score >= MIN_SCORE_THRESHOLD:
-            print(f"✓ Best match: {best_match['primary_artist']['name']} - {best_match['title']} (Score: {best_score})")
-            return best_match
-
-        print(f"✗ No good match found. Best score: {best_score} (threshold: {MIN_SCORE_THRESHOLD})")
-        return None
-
-    except Exception as e:
-        print(f"Genius API search error: {str(e)}")
-        return None
-
-async def search_web_for_lyrics(title: str, artist: str) -> list:
-    brave_api_key = os.getenv("BRAVE_API_KEY")
-    if not brave_api_key:
-        return []
-    
-    headers = {
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "X-Subscription-Token": brave_api_key
-    }
-    
-    params = {
-        "q": f"{title} {artist} lyrics",
-        "count": 3,
-        "result_filter": "web"
-    }
-
-    try:
-        response = requests.get("https://api.search.brave.com/res/v1/web/search", headers=headers, params=params)
-        response.raise_for_status()
-        return [r.get("url") for r in response.json().get("web", {}).get("results", [])][:3]
-    except requests.RequestException:
-        return []
-
-
-async def process_lyrics_content(url: str) -> str:
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        artist = request.artist.strip()
+        title = request.title.strip()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
-        for script in soup(["script", "style"]):
-            script.decompose()
-        text = soup.get_text(separator='\n')
-        text = re.sub(r'\n+', '\n', text).strip()
+        if not artist or not title:
+            raise HTTPException(status_code=400, detail="Artist and title are required")
         
-        return await format_with_mistral(text)
+        lyrics = ""
+        source = ""
+        
+        # Try Genius API first
+        song_data = await search_genius_song(artist, title)
+        if song_data:
+            lyrics = await fetch_lyrics_from_genius(song_data)
+            if lyrics:
+                source = "genius_api"
+        
+        # Fallback to Brave Search if Genius failed
+        if not lyrics:
+            lyrics = await search_with_brave(artist, title)
+            if lyrics:
+                source = "brave_search"
+        
+        if not lyrics:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Lyrics not found for '{title}' by '{artist}'"
+            )
+        
+        return LyricsResponse(
+            title=title,
+            artist=artist,
+            lyrics=lyrics,
+            source=source
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-    except requests.RequestException:
-        print(response.content)
-        return "Content extraction failed"
-
-
-async def format_with_mistral(content: str) -> str:
-    mistral_api_key = os.getenv("MISTRAL_API_KEY")
-    if not mistral_api_key:
-        return "Mistral API key not available"
-
-    headers = {
-        "Authorization": f"Bearer {mistral_api_key}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "mistral-large-latest",  # or your specific hosted model
-        "messages": [
-            {"role": "system", "content": "You are a helpful assistant that extracts only the clean lyrics from a web article."},
-            {"role": "user", "content": f"Please extract only the lyrics from the following text and format(not markdown format, just simply clean and format):\n\n{content}"}
-        ]
-    }
-
-    try:
-        response = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
-    except requests.RequestException as e:
-        return f"Failed to format lyrics with Mistral: {str(e)}"
-
-
-@lyrics_router.get("/info/{title}/{artist}")
-async def get_song_info(title: str, artist: str):
+@lyrics_router.get("/health")
+async def health_check():
+    """Health check endpoint"""
     return {
-        "title": title,
-        "artist": artist,
-        "message": "For lyrics, please visit official sources like the artist's website or licensed services.",
-        "legal_alternatives": [
-            "Official artist websites",
-            "Licensed streaming services",
-            "Purchase from digital music stores",
-            "Official music videos with lyrics"
-        ]
+        "status": "healthy",
+        "genius_api": bool(GENIUS_API_KEY),
+        "brave_api": bool(BRAVE_API_KEY)
     }

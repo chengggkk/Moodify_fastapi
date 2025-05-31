@@ -9,6 +9,10 @@ import unicodedata
 import re
 import time
 import random
+import asyncio
+import aiohttp
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 lyrics_router = APIRouter(prefix="/lyrics", tags=["lyrics"])
 
@@ -45,15 +49,144 @@ def calculate_similarity(str1: str, str2: str) -> float:
     """Calculate similarity between two strings"""
     return SequenceMatcher(None, str1, str2).ratio()
 
-def get_random_user_agent() -> str:
-    """Get a random user agent to avoid blocking"""
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+def get_session_with_retries():
+    """Create a requests session with retry strategy and better headers"""
+    session = requests.Session()
+    
+    # Retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+def get_enhanced_headers():
+    """Get enhanced headers to avoid blocking"""
+    return {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+        'DNT': '1',
+        'Sec-CH-UA': '"Not_A Brand";v="8", "Chromium";v="120"',
+        'Sec-CH-UA-Mobile': '?0',
+        'Sec-CH-UA-Platform': '"Windows"',
+    }
+
+async def fetch_with_multiple_strategies(url: str) -> Optional[str]:
+    """Try multiple strategies to fetch content"""
+    strategies = [
+        fetch_with_session,
+        fetch_with_cloudflare_bypass,
+        fetch_with_proxy_headers,
     ]
-    return random.choice(user_agents)
+    
+    for i, strategy in enumerate(strategies):
+        try:
+            print(f"Trying strategy {i+1} for {url}")
+            content = await strategy(url)
+            if content:
+                print(f"Strategy {i+1} successful")
+                return content
+        except Exception as e:
+            print(f"Strategy {i+1} failed: {e}")
+            continue
+    
+    return None
+
+async def fetch_with_session(url: str) -> Optional[str]:
+    """Fetch with enhanced session"""
+    session = get_session_with_retries()
+    
+    try:
+        # Random delay
+        await asyncio.sleep(random.uniform(2, 5))
+        
+        response = session.get(
+            url, 
+            headers=get_enhanced_headers(),
+            timeout=20,
+            allow_redirects=True
+        )
+        response.raise_for_status()
+        return response.text
+        
+    except Exception as e:
+        print(f"Session fetch error: {e}")
+        return None
+    finally:
+        session.close()
+
+async def fetch_with_cloudflare_bypass(url: str) -> Optional[str]:
+    """Try to bypass Cloudflare protection"""
+    try:
+        # Use different headers that might bypass protection
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Referer': 'https://www.google.com/',
+            'Origin': 'https://genius.com',
+            'Connection': 'keep-alive',
+            'Pragma': 'no-cache',
+            'Cache-Control': 'no-cache',
+        }
+        
+        # Longer delay
+        await asyncio.sleep(random.uniform(3, 7))
+        
+        response = requests.get(url, headers=headers, timeout=25)
+        
+        if response.status_code == 403:
+            return None
+            
+        response.raise_for_status()
+        return response.text
+        
+    except Exception as e:
+        print(f"Cloudflare bypass error: {e}")
+        return None
+
+async def fetch_with_proxy_headers(url: str) -> Optional[str]:
+    """Try with proxy-like headers"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://genius.com/',
+            'Connection': 'keep-alive',
+            'Cookie': 'cf_clearance=placeholder',  # Placeholder cookie
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+        }
+        
+        await asyncio.sleep(random.uniform(4, 8))
+        
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        return response.text
+        
+    except Exception as e:
+        print(f"Proxy headers error: {e}")
+        return None
 
 async def search_genius_song(artist: str, title: str) -> Optional[dict]:
     """Search for song on Genius API"""
@@ -202,31 +335,36 @@ def clean_lyrics_text(text: str) -> str:
     return '\n'.join(cleaned_lines)
 
 async def fetch_lyrics_from_genius(song_data: dict) -> str:
-    """Fetch lyrics from Genius song page"""
+    """Fetch lyrics from Genius song page with enhanced anti-blocking"""
     try:
         url = song_data.get("url")
         if not url:
             return ""
         
-        headers = {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-        }
+        print(f"Attempting to fetch lyrics from: {url}")
         
-        # Add delay to avoid rate limiting
-        time.sleep(random.uniform(1, 3))
+        # Try multiple strategies to bypass blocking
+        html_content = await fetch_with_multiple_strategies(url)
         
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        if not html_content:
+            print("All fetch strategies failed")
+            return ""
         
-        lyrics = extract_lyrics_with_lxml(response.text)
+        # Check if we got blocked (common blocking indicators)
+        if any(indicator in html_content.lower() for indicator in [
+            'access denied', 'blocked', 'cloudflare', 'please wait', 
+            'checking your browser', 'security check'
+        ]):
+            print("Detected blocking page, content not usable")
+            return ""
+        
+        lyrics = extract_lyrics_with_lxml(html_content)
+        
+        if lyrics:
+            print(f"Successfully extracted lyrics ({len(lyrics)} characters)")
+        else:
+            print("Failed to extract lyrics from page content")
+            
         return lyrics
         
     except Exception as e:
@@ -303,8 +441,16 @@ async def get_lyrics(request: LyricsRequest):
             if lyrics:
                 source = "genius_api"
         
-        # Fallback to Brave Search if Genius failed
+        # Try alternative sources if Genius failed
         if not lyrics:
+            print("Genius failed, trying alternative sources...")
+            lyrics = await try_alternative_lyrics_sources(artist, title)
+            if lyrics:
+                source = "alternative_source"
+        
+        # Fallback to Brave Search if everything else failed
+        if not lyrics:
+            print("All direct sources failed, trying Brave Search...")
             lyrics = await search_with_brave(artist, title)
             if lyrics:
                 source = "brave_search"

@@ -5,7 +5,6 @@ from story import story_router
 from Classic import music_router
 from Lyrics import lyrics_router
 from AudioFeature import audio_feature_router
-from donut import donut_router
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -21,7 +20,6 @@ app.include_router(story_router)
 app.include_router(music_router)
 app.include_router(lyrics_router)
 app.include_router(audio_feature_router)
-app.include_router(donut_router)
 
 if __name__ == "__main__":
     import uvicorn
